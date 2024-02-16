@@ -55,7 +55,7 @@ For running tests, we recommend [nextest](https://nexte.st/).
 Source distributions can run arbitrary code on build and can make unwanted modifications to your system (https://moyix.blogspot.com/2022/09/someones-been-messing-with-my-subnormals.html, https://pypi.org/project/nvidia-pyindex/), which can even occur when just resolving requirements. To prevent this, there's a Docker container you can run commands in:
 
 ```bash
-docker buildx build -t uv-builder -f builder.dockerfile --load .
+docker buildx build -t uv-builder -f Dockerfile --load .
 # Build for musl to avoid glibc errors, might not be required with your OS version
 cargo build --target x86_64-unknown-linux-musl --profile profiling --features vendored-openssl
 docker run --rm -it -v $(pwd):/app uv-builder /app/target/x86_64-unknown-linux-musl/profiling/uv-dev resolve-many --cache-dir /app/cache-docker /app/scripts/popular_packages/pypi_10k_most_dependents.txt
