@@ -256,12 +256,12 @@ struct PipCompileArgs {
     find_links: Vec<FlatIndexLocation>,
 
     /// Allow package upgrades, ignoring pinned versions in the existing output file.
-    #[clap(long)]
+    #[clap(long, short = 'U')]
     upgrade: bool,
 
     /// Allow upgrades for a specific package, ignoring pinned versions in the existing output
     /// file.
-    #[clap(long)]
+    #[clap(long, short = 'P')]
     upgrade_package: Vec<PackageName>,
 
     /// Include distribution hashes in the output file.
@@ -469,6 +469,14 @@ struct PipInstallArgs {
     /// Include all optional dependencies.
     #[clap(long, conflicts_with = "extra")]
     all_extras: bool,
+
+    /// Allow package upgrades.
+    #[clap(long, short = 'U')]
+    upgrade: bool,
+
+    /// Allow upgrade of a specific package.
+    #[clap(long, short = 'P')]
+    upgrade_package: Vec<PackageName>,
 
     /// Reinstall all packages, regardless of whether they're already installed.
     #[clap(long, alias = "force-reinstall")]
@@ -935,6 +943,7 @@ async fn run() -> Result<ExitStatus> {
                 ExtrasSpecification::Some(&args.extra)
             };
             let reinstall = Reinstall::from_args(args.reinstall, args.reinstall_package);
+            let upgrade = Upgrade::from_args(args.upgrade, args.upgrade_package);
             let no_binary = NoBinary::from_args(args.no_binary);
             let no_build = NoBuild::from_args(args.only_binary, args.no_build);
             let dependency_mode = if args.no_deps {
@@ -950,6 +959,7 @@ async fn run() -> Result<ExitStatus> {
                 args.resolution,
                 args.prerelease,
                 dependency_mode,
+                upgrade,
                 index_urls,
                 &reinstall,
                 args.link_mode,

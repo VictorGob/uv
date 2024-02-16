@@ -7,6 +7,7 @@ use tracing::warn;
 
 use pep440_rs::{VersionSpecifiers, VersionSpecifiersParseError};
 use pep508_rs::{Pep508Error, Requirement};
+use uv_normalize::{ExtraName, InvalidNameError};
 
 /// Ex) `>=7.2.0<8.0.0`
 static MISSING_COMMA: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\d)([<>=~^!])").unwrap());
@@ -14,11 +15,11 @@ static MISSING_COMMA: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\d)([<>=~^!])").u
 static NOT_EQUAL_TILDE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!=~((?:\d\.)*\d)").unwrap());
 /// Ex) `>=1.9.*`, `<3.4.*`
 static INVALID_TRAILING_DOT_STAR: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(<=|>=|<|>)(\d+\.\d+)\.\*").unwrap());
+    Lazy::new(|| Regex::new(r"(<=|>=|<|>)(\d+(\.\d+)?)\.\*").unwrap());
 /// Ex) `!=3.0*`
 static MISSING_DOT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\d\.\d)+\*").unwrap());
 /// Ex) `>=3.6,`
-static TRAILING_COMMA: Lazy<Regex> = Lazy::new(|| Regex::new(r",$").unwrap());
+static TRAILING_COMMA: Lazy<Regex> = Lazy::new(|| Regex::new(r",\s*$").unwrap());
 /// Ex) `>= '2.7'`, `>=3.6'`
 static STRAY_QUOTES: Lazy<Regex> = Lazy::new(|| Regex::new(r#"['"]"#).unwrap());
 
@@ -122,6 +123,36 @@ impl<'de> Deserialize<'de> for LenientVersionSpecifiers {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct LenientExtraName(ExtraName);
+
+impl LenientExtraName {
+    /// Parse an [`ExtraName`] from a string, but return `None` if the name is `.none`.
+    ///
+    /// Some versions of `flit` erroneously included `.none` as an extra name, which is not
+    /// allowed by PEP 508.
+    ///
+    /// See: <https://github.com/pypa/flit/issues/228/>
+    pub fn try_parse(name: String) -> Option<Result<Self, InvalidNameError>> {
+        match ExtraName::new(name) {
+            Ok(name) => Some(Ok(Self(name))),
+            Err(err) => {
+                if err.as_str() == ".none" {
+                    None
+                } else {
+                    Some(Err(err))
+                }
+            }
+        }
+    }
+}
+
+impl From<LenientExtraName> for ExtraName {
+    fn from(name: LenientExtraName) -> Self {
+        name.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -216,6 +247,10 @@ mod tests {
             .into();
         let expected: VersionSpecifiers = VersionSpecifiers::from_str(">=1.9").unwrap();
         assert_eq!(actual, expected);
+
+        let actual: VersionSpecifiers = LenientVersionSpecifiers::from_str(">=1.*").unwrap().into();
+        let expected: VersionSpecifiers = VersionSpecifiers::from_str(">=1").unwrap();
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -233,6 +268,15 @@ mod tests {
     fn specifier_trailing_comma() {
         let actual: VersionSpecifiers =
             LenientVersionSpecifiers::from_str(">=3.6,").unwrap().into();
+        let expected: VersionSpecifiers = VersionSpecifiers::from_str(">=3.6").unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn specifier_trailing_comma_trailing_space() {
+        let actual: VersionSpecifiers = LenientVersionSpecifiers::from_str(">=3.6, ")
+            .unwrap()
+            .into();
         let expected: VersionSpecifiers = VersionSpecifiers::from_str(">=3.6").unwrap();
         assert_eq!(actual, expected);
     }

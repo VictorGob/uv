@@ -1,9 +1,9 @@
 # uv
 
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
-[![image](https://img.shields.io/pypi/v/uv/0.1.1.svg)](https://pypi.python.org/pypi/uv)
-[![image](https://img.shields.io/pypi/l/uv/0.1.1.svg)](https://pypi.python.org/pypi/uv)
-[![image](https://img.shields.io/pypi/pyversions/uv/0.1.1.svg)](https://pypi.python.org/pypi/uv)
+[![image](https://img.shields.io/pypi/v/uv/0.1.2.svg)](https://pypi.python.org/pypi/uv)
+[![image](https://img.shields.io/pypi/l/uv/0.1.2.svg)](https://pypi.python.org/pypi/uv)
+[![image](https://img.shields.io/pypi/pyversions/uv/0.1.2.svg)](https://pypi.python.org/pypi/uv)
 [![Actions status](https://github.com/astral-sh/uv/workflows/CI/badge.svg)](https://github.com/astral-sh/uv/actions)
 [![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?logo=discord&logoColor=white)](https://discord.gg/astral-sh)
 
@@ -25,7 +25,7 @@ uv is backed by [Astral](https://astral.sh), the creators of [Ruff](https://gith
 - 🧰 Advanced features such as [dependency version overrides](#dependency-overrides) and
    [alternative resolution strategies](#resolution-strategy).
 - ⁉️ Best-in-class error messages with a conflict-tracking resolver.
-- 🤝 Support for a wide range of advanced `pip` features, including: editable installs, Git
+- 🤝 Support for a wide range of advanced `pip` features, including editable installs, Git
   dependencies, direct URL dependencies, local dependencies, constraints, source distributions,
   HTML and JSON indexes, and more.
 
@@ -51,6 +51,16 @@ To create a virtual environment:
 
 ```shell
 uv venv  # Create a virtual environment at .venv.
+```
+
+To activate the virtual environment:
+
+```shell
+# On macOS and Linux.
+source .venv/bin/activate
+
+# On Windows.
+.\.venv\Scripts\activate.ps1
 ```
 
 To install a package into the virtual environment:
@@ -113,7 +123,7 @@ Our goal is to evolve uv into such a tool.
 
 In the meantime, though, the narrower `pip-tools` scope allows us to solve the low-level problems
 involved in building such a tool (like package installation) while shipping something immediately
-useful with minimal barrier to adoption.
+useful with a minimal barrier to adoption.
 
 ## Advanced Usage
 
@@ -184,7 +194,7 @@ By default, uv follows the standard Python dependency resolution strategy of pre
 latest compatible version of each package. For example, `uv pip install flask>=2.0.0` will
 install the latest version of Flask (at time of writing: `3.0.0`).
 
-However, uv's resolution strategy be configured to prefer the _lowest_ compatible version of
+However, uv's resolution strategy can be configured to prefer the _lowest_ compatible version of
 each package (`--resolution=lowest`), or even the lowest compatible version of any _direct_
 dependencies (`--resolution=lowest-direct`), both of which can be useful for library authors looking
 to test their packages against the oldest supported versions of their dependencies.
@@ -346,6 +356,6 @@ dually licensed as above, without any additional terms or conditions.
 
 <div align="center">
   <a target="_blank" href="https://astral.sh" style="background:none">
-    <img src="https://raw.githubusercontent.com/astral-sh/uv/main/assets/svg/Astral.svg">
+    <img src="https://raw.githubusercontent.com/astral-sh/uv/main/assets/svg/Astral.svg" alt="Made by Astral">
   </a>
 </div>
