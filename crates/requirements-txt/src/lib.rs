@@ -309,6 +309,7 @@ impl RequirementsTxt {
                 error: err,
             }
         })?;
+        println!("*** data: {:?}", data);
         if data == Self::default() {
             warn!(
                 "Requirements file {} does not contain any dependencies",
