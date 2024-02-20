@@ -1,4 +1,5 @@
 use std::env;
+use std::io::stdout;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -7,7 +8,7 @@ use anstream::eprintln;
 use anyhow::Result;
 use chrono::{DateTime, Days, NaiveDate, NaiveTime, Utc};
 use clap::error::{ContextKind, ContextValue};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use owo_colors::OwoColorize;
 use tracing::instrument;
 
@@ -47,6 +48,8 @@ mod confirm;
 mod logging;
 mod printer;
 mod requirements;
+
+const DEFAULT_VENV_NAME: &str = ".venv";
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -108,16 +111,50 @@ impl From<ColorChoice> for anstream::ColorChoice {
 #[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Resolve and install Python packages.
-    Pip(PipArgs),
+    Pip(PipNamespace),
     /// Create a virtual environment.
     #[clap(alias = "virtualenv", alias = "v")]
     Venv(VenvArgs),
-    /// Clear the cache.
+    /// Manage the cache.
+    Cache(CacheNamespace),
+    /// Remove all items from the cache.
+    #[clap(hide = true)]
     Clean(CleanArgs),
+    /// Generate shell completion
+    #[clap(alias = "--generate-shell-completion", hide = true)]
+    GenerateShellCompletion { shell: clap_complete_command::Shell },
 }
 
 #[derive(Args)]
-struct PipArgs {
+struct CacheNamespace {
+    #[clap(subcommand)]
+    command: CacheCommand,
+}
+
+#[derive(Subcommand)]
+enum CacheCommand {
+    /// Remove all items from the cache.
+    Clean(CleanArgs),
+    /// Show the cache directory.
+    Dir,
+}
+
+#[derive(Args)]
+#[allow(clippy::struct_excessive_bools)]
+struct CleanArgs {
+    /// The packages to remove from the cache.
+    package: Vec<PackageName>,
+}
+
+#[derive(Args)]
+#[allow(clippy::struct_excessive_bools)]
+struct DirArgs {
+    /// The packages to remove from the cache.
+    package: Vec<PackageName>,
+}
+
+#[derive(Args)]
+struct PipNamespace {
     #[clap(subcommand)]
     command: PipCommand,
 }
@@ -170,7 +207,7 @@ struct PipCompileArgs {
     /// trigger the installation of that package.
     ///
     /// This is equivalent to pip's `--constraint` option.
-    #[clap(short, long)]
+    #[clap(long, short)]
     constraint: Vec<PathBuf>,
 
     /// Override versions using the given requirements files.
@@ -205,7 +242,7 @@ struct PipCompileArgs {
     prerelease: PreReleaseMode,
 
     /// Write the compiled requirements to the given `requirements.txt` file.
-    #[clap(short, long)]
+    #[clap(long, short)]
     output_file: Option<PathBuf>,
 
     /// Exclude comment annotations indicating the source of each package.
@@ -233,12 +270,12 @@ struct PipCompileArgs {
     #[clap(long)]
     refresh_package: Vec<PackageName>,
 
-    /// The URL of the Python Package Index.
-    #[clap(long, short, default_value = IndexUrl::Pypi.as_str(), env = "UV_INDEX_URL")]
-    index_url: IndexUrl,
+    /// The URL of the Python package index (by default: https://pypi.org/simple).
+    #[clap(long, short, env = "UV_INDEX_URL")]
+    index_url: Option<IndexUrl>,
 
     /// Extra URLs of package indexes to use, in addition to `--index-url`.
-    #[clap(long)]
+    #[clap(long, env = "UV_EXTRA_INDEX_URL")]
     extra_index_url: Vec<IndexUrl>,
 
     /// Ignore the registry index (e.g., PyPI), instead relying on direct URL dependencies and those
@@ -252,7 +289,7 @@ struct PipCompileArgs {
     /// source distributions (`.tar.gz` or `.zip`) at the top level.
     ///
     /// If a URL, the page must contain a flat list of links to package files.
-    #[clap(long)]
+    #[clap(long, short)]
     find_links: Vec<FlatIndexLocation>,
 
     /// Allow package upgrades, ignoring pinned versions in the existing output file.
@@ -357,12 +394,12 @@ struct PipSyncArgs {
     #[clap(long, value_enum, default_value_t = install_wheel_rs::linker::LinkMode::default())]
     link_mode: install_wheel_rs::linker::LinkMode,
 
-    /// The URL of the Python Package Index.
-    #[clap(long, short, default_value = IndexUrl::Pypi.as_str(), env = "UV_INDEX_URL")]
-    index_url: IndexUrl,
+    /// The URL of the Python package index (by default: https://pypi.org/simple).
+    #[clap(long, short, env = "UV_INDEX_URL")]
+    index_url: Option<IndexUrl>,
 
     /// Extra URLs of package indexes to use, in addition to `--index-url`.
-    #[clap(long)]
+    #[clap(long, env = "UV_EXTRA_INDEX_URL")]
     extra_index_url: Vec<IndexUrl>,
 
     /// Locations to search for candidate distributions, beyond those found in the indexes.
@@ -371,7 +408,7 @@ struct PipSyncArgs {
     /// source distributions (`.tar.gz` or `.zip`) at the top level.
     ///
     /// If a URL, the page must contain a flat list of links to package files.
-    #[clap(long)]
+    #[clap(long, short)]
     find_links: Vec<FlatIndexLocation>,
 
     /// Ignore the registry index (e.g., PyPI), instead relying on direct URL dependencies and those
@@ -433,11 +470,11 @@ struct PipInstallArgs {
     package: Vec<String>,
 
     /// Install all packages listed in the given requirements files.
-    #[clap(short, long, group = "sources")]
+    #[clap(long, short, group = "sources")]
     requirement: Vec<PathBuf>,
 
     /// Install the editable package based on the provided local file path.
-    #[clap(short, long, group = "sources")]
+    #[clap(long, short, group = "sources")]
     editable: Vec<String>,
 
     /// Constrain versions using the given requirements files.
@@ -447,7 +484,7 @@ struct PipInstallArgs {
     /// trigger the installation of that package.
     ///
     /// This is equivalent to pip's `--constraint` option.
-    #[clap(short, long)]
+    #[clap(long, short)]
     constraint: Vec<PathBuf>,
 
     /// Override versions using the given requirements files.
@@ -519,15 +556,15 @@ struct PipInstallArgs {
     prerelease: PreReleaseMode,
 
     /// Write the compiled requirements to the given `requirements.txt` file.
-    #[clap(short, long)]
+    #[clap(long, short)]
     output_file: Option<PathBuf>,
 
-    /// The URL of the Python Package Index.
-    #[clap(long, short, default_value = IndexUrl::Pypi.as_str(), env = "UV_INDEX_URL")]
-    index_url: IndexUrl,
+    /// The URL of the Python package index (by default: https://pypi.org/simple).
+    #[clap(long, short, env = "UV_INDEX_URL")]
+    index_url: Option<IndexUrl>,
 
     /// Extra URLs of package indexes to use, in addition to `--index-url`.
-    #[clap(long)]
+    #[clap(long, env = "UV_EXTRA_INDEX_URL")]
     extra_index_url: Vec<IndexUrl>,
 
     /// Locations to search for candidate distributions, beyond those found in the indexes.
@@ -536,7 +573,7 @@ struct PipInstallArgs {
     /// source distributions (`.tar.gz` or `.zip`) at the top level.
     ///
     /// If a URL, the page must contain a flat list of links to package files.
-    #[clap(long)]
+    #[clap(long, short)]
     find_links: Vec<FlatIndexLocation>,
 
     /// Ignore the registry index (e.g., PyPI), instead relying on direct URL dependencies and those
@@ -602,11 +639,11 @@ struct PipUninstallArgs {
     package: Vec<String>,
 
     /// Uninstall all packages listed in the given requirements files.
-    #[clap(short, long, group = "sources")]
+    #[clap(long, short, group = "sources")]
     requirement: Vec<PathBuf>,
 
     /// Uninstall the editable package based on the provided local file path.
-    #[clap(short, long, group = "sources")]
+    #[clap(long, short, group = "sources")]
     editable: Vec<String>,
 }
 
@@ -617,13 +654,6 @@ struct PipFreezeArgs {
     /// issues.
     #[clap(long)]
     strict: bool,
-}
-
-#[derive(Args)]
-#[allow(clippy::struct_excessive_bools)]
-struct CleanArgs {
-    /// The packages to remove from the cache.
-    package: Vec<PackageName>,
 }
 
 #[derive(Args)]
@@ -640,7 +670,7 @@ struct VenvArgs {
     /// Note that this is different from `--python-version` in `pip compile`, which takes `3.10` or `3.10.13` and
     /// doesn't look for a Python interpreter on disk.
     // Short `-p` to match `virtualenv`
-    #[clap(short, long, verbatim_doc_comment)]
+    #[clap(long, short, verbatim_doc_comment)]
     python: Option<String>,
 
     /// Install seed packages (`pip`, `setuptools`, and `wheel`) into the virtual environment.
@@ -648,15 +678,27 @@ struct VenvArgs {
     seed: bool,
 
     /// The path to the virtual environment to create.
-    #[clap(default_value = ".venv")]
+    #[clap(default_value = DEFAULT_VENV_NAME)]
     name: PathBuf,
 
-    /// The URL of the Python Package Index.
-    #[clap(long, short, default_value = IndexUrl::Pypi.as_str(), env = "UV_INDEX_URL")]
-    index_url: IndexUrl,
+    /// Provide an alternative prompt prefix for the virtual environment.
+    ///
+    /// The default behavior depends on whether the virtual environment path is provided:
+    /// - If provided (`uv venv project`), the prompt is set to the virtual environment's directory name.
+    /// - If not provided (`uv venv`), the prompt is set to the current directory's name.
+    ///
+    /// Possible values:
+    /// - `.`: Use the current directory name.
+    /// - Any string: Use the given string.
+    #[clap(long, verbatim_doc_comment)]
+    prompt: Option<String>,
+
+    /// The URL of the Python package index (by default: https://pypi.org/simple).
+    #[clap(long, short, env = "UV_INDEX_URL")]
+    index_url: Option<IndexUrl>,
 
     /// Extra URLs of package indexes to use, in addition to `--index-url`.
-    #[clap(long)]
+    #[clap(long, env = "UV_EXTRA_INDEX_URL")]
     extra_index_url: Vec<IndexUrl>,
 
     /// Ignore the registry index (e.g., PyPI), instead relying on direct URL dependencies and those
@@ -786,7 +828,7 @@ async fn run() -> Result<ExitStatus> {
     let cache = Cache::try_from(cli.cache_args)?;
 
     match cli.command {
-        Commands::Pip(PipArgs {
+        Commands::Pip(PipNamespace {
             command: PipCommand::Compile(args),
         }) => {
             args.compat_args.validate()?;
@@ -807,7 +849,7 @@ async fn run() -> Result<ExitStatus> {
                 .into_iter()
                 .map(RequirementsSource::from_path)
                 .collect::<Vec<_>>();
-            let index_urls = IndexLocations::from_args(
+            let index_urls = IndexLocations::new(
                 args.index_url,
                 args.extra_index_url,
                 args.find_links,
@@ -861,13 +903,13 @@ async fn run() -> Result<ExitStatus> {
             )
             .await
         }
-        Commands::Pip(PipArgs {
+        Commands::Pip(PipNamespace {
             command: PipCommand::Sync(args),
         }) => {
             args.compat_args.validate()?;
 
             let cache = cache.with_refresh(Refresh::from_args(args.refresh, args.refresh_package));
-            let index_urls = IndexLocations::from_args(
+            let index_urls = IndexLocations::new(
                 args.index_url,
                 args.extra_index_url,
                 args.find_links,
@@ -904,7 +946,7 @@ async fn run() -> Result<ExitStatus> {
             )
             .await
         }
-        Commands::Pip(PipArgs {
+        Commands::Pip(PipNamespace {
             command: PipCommand::Install(args),
         }) => {
             let cache = cache.with_refresh(Refresh::from_args(args.refresh, args.refresh_package));
@@ -929,7 +971,7 @@ async fn run() -> Result<ExitStatus> {
                 .into_iter()
                 .map(RequirementsSource::from_path)
                 .collect::<Vec<_>>();
-            let index_urls = IndexLocations::from_args(
+            let index_urls = IndexLocations::new(
                 args.index_url,
                 args.extra_index_url,
                 args.find_links,
@@ -982,7 +1024,7 @@ async fn run() -> Result<ExitStatus> {
             )
             .await
         }
-        Commands::Pip(PipArgs {
+        Commands::Pip(PipNamespace {
             command: PipCommand::Uninstall(args),
         }) => {
             let sources = args
@@ -998,24 +1040,44 @@ async fn run() -> Result<ExitStatus> {
                 .collect::<Vec<_>>();
             commands::pip_uninstall(&sources, cache, printer).await
         }
-        Commands::Pip(PipArgs {
+        Commands::Pip(PipNamespace {
             command: PipCommand::Freeze(args),
-        }) => commands::freeze(&cache, args.strict, printer),
-        Commands::Clean(args) => commands::clean(&cache, &args.package, printer),
+        }) => commands::pip_freeze(&cache, args.strict, printer),
+        Commands::Cache(CacheNamespace {
+            command: CacheCommand::Clean(args),
+        })
+        | Commands::Clean(args) => commands::cache_clean(&cache, &args.package, printer),
+        Commands::Cache(CacheNamespace {
+            command: CacheCommand::Dir,
+        }) => {
+            commands::cache_dir(&cache);
+            Ok(ExitStatus::Success)
+        }
         Commands::Venv(args) => {
             args.compat_args.validate()?;
 
-            let index_locations = IndexLocations::from_args(
+            let index_locations = IndexLocations::new(
                 args.index_url,
                 args.extra_index_url,
                 // No find links for the venv subcommand, to keep things simple
                 Vec::new(),
                 args.no_index,
             );
+
+            // Since we use ".venv" as the default name, we use "." as the default prompt.
+            let prompt = args.prompt.or_else(|| {
+                if args.name == PathBuf::from(DEFAULT_VENV_NAME) {
+                    Some(".".to_string())
+                } else {
+                    None
+                }
+            });
+
             commands::venv(
                 &args.name,
                 args.python.as_deref(),
                 &index_locations,
+                gourgeist::Prompt::from_args(prompt),
                 if args.offline {
                     Connectivity::Offline
                 } else {
@@ -1027,6 +1089,10 @@ async fn run() -> Result<ExitStatus> {
                 printer,
             )
             .await
+        }
+        Commands::GenerateShellCompletion { shell } => {
+            shell.generate(&mut Cli::command(), &mut stdout());
+            Ok(ExitStatus::Success)
         }
     }
 }

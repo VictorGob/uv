@@ -1,5 +1,6 @@
 //! Given a set of requirements, find a set of compatible packages.
 
+use std::borrow::Cow;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
@@ -12,32 +13,11 @@ use pubgrub::range::Range;
 use pubgrub::solver::{Incompatibility, State};
 use pubgrub::type_aliases::DependencyConstraints;
 use rustc_hash::{FxHashMap, FxHashSet};
-
 use tokio::select;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info_span, instrument, trace, warn, Instrument};
 use url::Url;
 
-use crate::candidate_selector::{CandidateDist, CandidateSelector};
-use crate::error::ResolveError;
-use crate::manifest::Manifest;
-use crate::overrides::Overrides;
-use crate::pins::FilePins;
-use crate::pubgrub::{
-    PubGrubDependencies, PubGrubDistribution, PubGrubPackage, PubGrubPriorities, PubGrubPython,
-    PubGrubSpecifier,
-};
-use crate::python_requirement::PythonRequirement;
-use crate::resolution::ResolutionGraph;
-use crate::resolver::allowed_urls::AllowedUrls;
-pub use crate::resolver::index::InMemoryIndex;
-use crate::resolver::provider::DefaultResolverProvider;
-pub use crate::resolver::provider::ResolverProvider;
-pub(crate) use crate::resolver::provider::VersionsResponse;
-use crate::resolver::reporter::Facade;
-pub use crate::resolver::reporter::{BuildId, Reporter};
-use crate::yanks::AllowedYanks;
-use crate::{DependencyMode, Options};
 use distribution_filename::WheelFilename;
 use distribution_types::{
     BuiltDist, Dist, DistributionMetadata, IncompatibleWheel, LocalEditable, Name, RemoteSource,
@@ -52,6 +32,27 @@ use uv_distribution::DistributionDatabase;
 use uv_interpreter::Interpreter;
 use uv_normalize::PackageName;
 use uv_traits::BuildContext;
+
+use crate::candidate_selector::{CandidateDist, CandidateSelector};
+use crate::error::ResolveError;
+use crate::manifest::Manifest;
+use crate::overrides::Overrides;
+use crate::pins::FilePins;
+use crate::pubgrub::{
+    PubGrubDependencies, PubGrubDistribution, PubGrubPackage, PubGrubPriorities, PubGrubPython,
+    PubGrubSpecifier,
+};
+use crate::python_requirement::PythonRequirement;
+use crate::resolution::ResolutionGraph;
+use crate::resolver::allowed_urls::AllowedUrls;
+pub use crate::resolver::index::InMemoryIndex;
+pub use crate::resolver::provider::DefaultResolverProvider;
+pub use crate::resolver::provider::ResolverProvider;
+pub(crate) use crate::resolver::provider::VersionsResponse;
+use crate::resolver::reporter::Facade;
+pub use crate::resolver::reporter::{BuildId, Reporter};
+use crate::yanks::AllowedYanks;
+use crate::{DependencyMode, Options};
 
 mod allowed_urls;
 mod index;
@@ -160,16 +161,8 @@ impl<'a, Provider: ResolverProvider> Resolver<'a, Provider> {
         // Determine all the editable requirements.
         let mut editables = FxHashMap::default();
         for (editable_requirement, metadata) in &manifest.editables {
-            // Convert the editable requirement into a distribution.
-            let dist = Dist::from_editable(metadata.name.clone(), editable_requirement.clone())
-                .expect("This is a valid distribution");
-
-            // Mock editable responses.
-            let package_id = dist.package_id();
-            index.distributions.register(package_id.clone());
-            index.distributions.done(package_id, metadata.clone());
             editables.insert(
-                dist.name().clone(),
+                metadata.name.clone(),
                 (editable_requirement.clone(), metadata.clone()),
             );
         }
@@ -187,12 +180,17 @@ impl<'a, Provider: ResolverProvider> Resolver<'a, Provider> {
                     None
                 }
             })
-            .chain(
-                manifest
-                    .editables
-                    .iter()
-                    .map(|(editable, _)| editable.raw()),
-            )
+            .chain(manifest.editables.iter().flat_map(|(editable, metadata)| {
+                std::iter::once(editable.raw()).chain(metadata.requires_dist.iter().filter_map(
+                    |req| {
+                        if let Some(pep508_rs::VersionOrUrl::Url(url)) = &req.version_or_url {
+                            Some(url.raw())
+                        } else {
+                            None
+                        }
+                    },
+                ))
+            }))
             .collect();
 
         // Determine the allowed yanked package versions
@@ -633,6 +631,16 @@ impl<'a, Provider: ResolverProvider> Resolver<'a, Provider> {
             }
 
             PubGrubPackage::Package(package_name, extra, None) => {
+                // If the dist is an editable, return the version from the editable metadata.
+                if let Some((_local, metadata)) = self.editables.get(package_name) {
+                    let version = metadata.version.clone();
+                    return if range.contains(&version) {
+                        Ok(Some(ResolverVersion::Available(version)))
+                    } else {
+                        Ok(None)
+                    };
+                }
+
                 // Wait for the metadata to be available.
                 let versions_response = self
                     .index
@@ -683,7 +691,7 @@ impl<'a, Provider: ResolverProvider> Resolver<'a, Provider> {
                 let dist = match candidate.dist() {
                     CandidateDist::Compatible(dist) => dist,
                     CandidateDist::ExcludeNewer => {
-                        // If the version is incomatible because of `exclude_newer`, pretend the versions do not exist
+                        // If the version is incompatible because of `exclude_newer`, pretend the versions do not exist
                         return Ok(None);
                     }
                     CandidateDist::Incompatible(incompatibility) => {
@@ -727,7 +735,7 @@ impl<'a, Provider: ResolverProvider> Resolver<'a, Provider> {
                         dist.for_resolution()
                             .dist
                             .filename()
-                            .unwrap_or("unknown filename")
+                            .unwrap_or(Cow::Borrowed("unknown filename"))
                     );
                 } else {
                     debug!(
@@ -737,7 +745,7 @@ impl<'a, Provider: ResolverProvider> Resolver<'a, Provider> {
                         dist.for_resolution()
                             .dist
                             .filename()
-                            .unwrap_or("unknown filename")
+                            .unwrap_or(Cow::Borrowed("unknown filename"))
                     );
                 }
 
@@ -776,6 +784,7 @@ impl<'a, Provider: ResolverProvider> Resolver<'a, Provider> {
                     &self.overrides,
                     None,
                     None,
+                    None,
                     self.markers,
                 );
                 if let Err(
@@ -798,11 +807,7 @@ impl<'a, Provider: ResolverProvider> Resolver<'a, Provider> {
                 // Add a dependency on each editable.
                 for (editable, metadata) in self.editables.values() {
                     constraints.insert(
-                        PubGrubPackage::Package(
-                            metadata.name.clone(),
-                            None,
-                            Some(editable.url().clone()),
-                        ),
+                        PubGrubPackage::Package(metadata.name.clone(), None, None),
                         Range::singleton(metadata.version.clone()),
                     );
                     for extra in &editable.extras {
@@ -810,7 +815,7 @@ impl<'a, Provider: ResolverProvider> Resolver<'a, Provider> {
                             PubGrubPackage::Package(
                                 metadata.name.clone(),
                                 Some(extra.clone()),
-                                Some(editable.url().clone()),
+                                None,
                             ),
                             Range::singleton(metadata.version.clone()),
                         );
@@ -830,7 +835,38 @@ impl<'a, Provider: ResolverProvider> Resolver<'a, Provider> {
                     return Ok(Dependencies::Available(DependencyConstraints::default()));
                 }
 
-                // Determine the distribution to lookup
+                // Determine if the distribution is editable.
+                if let Some((_local, metadata)) = self.editables.get(package_name) {
+                    let mut constraints = PubGrubDependencies::from_requirements(
+                        &metadata.requires_dist,
+                        &self.constraints,
+                        &self.overrides,
+                        Some(package_name),
+                        url.as_ref(),
+                        extra.as_ref(),
+                        self.markers,
+                    )?;
+
+                    for (package, version) in constraints.iter() {
+                        debug!("Adding transitive dependency: {package}{version}");
+
+                        // Emit a request to fetch the metadata for this package.
+                        self.visit_package(package, priorities, request_sink)
+                            .await?;
+                    }
+
+                    // If a package has an extra, insert a constraint on the base package.
+                    if extra.is_some() {
+                        constraints.insert(
+                            PubGrubPackage::Package(package_name.clone(), None, None),
+                            Range::singleton(version.clone()),
+                        );
+                    }
+
+                    return Ok(Dependencies::Available(constraints.into()));
+                }
+
+                // Determine the distribution to lookup.
                 let dist = match url {
                     Some(url) => PubGrubDistribution::from_url(package_name, url),
                     None => PubGrubDistribution::from_registry(package_name, version),
@@ -861,8 +897,9 @@ impl<'a, Provider: ResolverProvider> Resolver<'a, Provider> {
                     &metadata.requires_dist,
                     &self.constraints,
                     &self.overrides,
-                    extra.as_ref(),
                     Some(package_name),
+                    url.as_ref(),
+                    extra.as_ref(),
                     self.markers,
                 )?;
 
@@ -877,7 +914,7 @@ impl<'a, Provider: ResolverProvider> Resolver<'a, Provider> {
                 // If a package has an extra, insert a constraint on the base package.
                 if extra.is_some() {
                     constraints.insert(
-                        PubGrubPackage::Package(package_name.clone(), None, None),
+                        PubGrubPackage::Package(package_name.clone(), None, url.clone()),
                         Range::singleton(version.clone()),
                     );
                 }
@@ -984,6 +1021,11 @@ impl<'a, Provider: ResolverProvider> Resolver<'a, Provider> {
 
             // Pre-fetch the package and distribution metadata.
             Request::Prefetch(package_name, range) => {
+                // Ignore editables.
+                if self.editables.contains_key(&package_name) {
+                    return Ok(None);
+                }
+
                 // Wait for the package metadata to become available.
                 let versions_response = self
                     .index

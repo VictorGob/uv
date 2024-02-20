@@ -163,13 +163,6 @@ pub(crate) async fn pip_install(
     // Track in-flight downloads, builds, etc., across resolutions.
     let in_flight = InFlight::default();
 
-    let options = OptionsBuilder::new()
-        .resolution_mode(resolution_mode)
-        .prerelease_mode(prerelease_mode)
-        .dependency_mode(dependency_mode)
-        .exclude_newer(exclude_newer)
-        .build();
-
     let resolve_dispatch = BuildDispatch::new(
         &client,
         &cache,
@@ -183,7 +176,7 @@ pub(crate) async fn pip_install(
         no_build,
         no_binary,
     )
-    .with_options(options);
+    .with_options(OptionsBuilder::new().exclude_newer(exclude_newer).build());
 
     // Build all editable distributions. The editables are shared between resolution and
     // installation, and should live for the duration of the command. If an editable is already
@@ -204,6 +197,13 @@ pub(crate) async fn pip_install(
         )
         .await?
     };
+
+    let options = OptionsBuilder::new()
+        .resolution_mode(resolution_mode)
+        .prerelease_mode(prerelease_mode)
+        .dependency_mode(dependency_mode)
+        .exclude_newer(exclude_newer)
+        .build();
 
     // Resolve the requirements.
     let resolution = match resolve(
@@ -258,6 +258,7 @@ pub(crate) async fn pip_install(
             no_build,
             no_binary,
         )
+        .with_options(OptionsBuilder::new().exclude_newer(exclude_newer).build())
     };
 
     // Sync the environment.
@@ -506,7 +507,7 @@ async fn install(
         reinstalls,
         extraneous: _,
     } = Planner::with_requirements(&requirements)
-        .with_editable_requirements(editables)
+        .with_editable_requirements(&editables)
         .build(
             site_packages,
             reinstall,
@@ -546,33 +547,6 @@ async fn install(
         })
         .collect::<Vec<_>>();
 
-    // TODO(konstin): Also check the cache whether any cached or installed dist is already known to
-    // have been yanked, we currently don't show this message on the second run anymore
-    for dist in &remote {
-        let Some(file) = dist.file() else {
-            continue;
-        };
-        match &file.yanked {
-            None | Some(Yanked::Bool(false)) => {}
-            Some(Yanked::Bool(true)) => {
-                writeln!(
-                    printer,
-                    "{}{} {dist} is yanked.",
-                    "warning".yellow().bold(),
-                    ":".bold(),
-                )?;
-            }
-            Some(Yanked::Reason(reason)) => {
-                writeln!(
-                    printer,
-                    "{}{} {dist} is yanked (reason: \"{reason}\").",
-                    "warning".yellow().bold(),
-                    ":".bold(),
-                )?;
-            }
-        }
-    }
-
     // Download, build, and unzip any missing distributions.
     let wheels = if remote.is_empty() {
         vec![]
@@ -583,7 +557,7 @@ async fn install(
             .with_reporter(DownloadReporter::from(printer).with_length(remote.len() as u64));
 
         let wheels = downloader
-            .download(remote, in_flight)
+            .download(remote.clone(), in_flight)
             .await
             .context("Failed to download distributions")?;
 
@@ -662,7 +636,7 @@ async fn install(
                     printer,
                     " {} {}{}",
                     "+".green(),
-                    event.dist.name().as_ref().white().bold(),
+                    event.dist.name().as_ref().bold(),
                     event.dist.installed_version().to_string().dimmed()
                 )?;
             }
@@ -671,8 +645,35 @@ async fn install(
                     printer,
                     " {} {}{}",
                     "-".red(),
-                    event.dist.name().as_ref().white().bold(),
+                    event.dist.name().as_ref().bold(),
                     event.dist.installed_version().to_string().dimmed()
+                )?;
+            }
+        }
+    }
+
+    // TODO(konstin): Also check the cache whether any cached or installed dist is already known to
+    // have been yanked, we currently don't show this message on the second run anymore
+    for dist in &remote {
+        let Some(file) = dist.file() else {
+            continue;
+        };
+        match &file.yanked {
+            None | Some(Yanked::Bool(false)) => {}
+            Some(Yanked::Bool(true)) => {
+                writeln!(
+                    printer,
+                    "{}{} {dist} is yanked.",
+                    "warning".yellow().bold(),
+                    ":".bold(),
+                )?;
+            }
+            Some(Yanked::Reason(reason)) => {
+                writeln!(
+                    printer,
+                    "{}{} {dist} is yanked (reason: \"{reason}\").",
+                    "warning".yellow().bold(),
+                    ":".bold(),
                 )?;
             }
         }

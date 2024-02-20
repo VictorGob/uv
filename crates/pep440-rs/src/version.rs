@@ -349,7 +349,7 @@ impl Version {
         }
     }
 
-    /// Returns the pre-relase part of this version, if it exists.
+    /// Returns the pre-release part of this version, if it exists.
     #[inline]
     pub fn pre(&self) -> Option<PreRelease> {
         match *self.inner {
@@ -755,7 +755,7 @@ impl FromStr for Version {
 /// pre-release numeric value.
 /// * Byte 0 corresponds to the dev-release segment. If there is no dev-release
 /// segment, then byte 0 is set to 0xFF. This makes "no dev-release" sort after
-/// "has dev-release." The dev-release value (constrainted to be <u8::MAX) is
+/// "has dev-release." The dev-release value (constrained to be <u8::MAX) is
 /// stored in byte 0 as-is.
 ///
 /// The order of the encoding above is significant. For example, the
@@ -2291,7 +2291,7 @@ fn parse_u64(bytes: &[u8]) -> Result<u64, VersionParseError> {
     Ok(n)
 }
 
-/// The minimum version that can be represented by a [`Version`].
+/// The minimum version that can be represented by a [`Version`]: `0a0.dev0`.
 pub static MIN_VERSION: once_cell::sync::Lazy<Version> =
     once_cell::sync::Lazy::new(|| Version::from_str("0a0.dev0").unwrap());
 

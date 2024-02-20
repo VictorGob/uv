@@ -1,0 +1,17 @@
+[files]
+extend-exclude = [
+    "**/snapshots/",
+    "scripts/**/*.in",
+]
+ignore-hidden = false
+
+[default]
+extend-ignore-re = [
+    "FRiENDlY-\\.\\.\\.-_-BARd",
+    "FrIeNdLy-\\._\\.-bArD",
+    "I borken you cache",
+    "eb1ba5f5",
+]
+
+[default.extend-identifiers]
+seeked = "seeked" # special term used for streams

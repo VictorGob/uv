@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
+use std::env;
 use std::fmt::Debug;
 use std::path::Path;
 use std::str::FromStr;
 
-use async_http_range_reader::{AsyncHttpRangeReader, AsyncHttpRangeReaderError};
+use async_http_range_reader::AsyncHttpRangeReader;
 use async_zip::tokio::read::seek::ZipFileReader;
 use futures::{FutureExt, TryStreamExt};
 use reqwest::{Client, ClientBuilder, Response, StatusCode};
@@ -23,6 +24,7 @@ use pep440_rs::Version;
 use pypi_types::{Metadata21, SimpleJson};
 use uv_cache::{Cache, CacheBucket, WheelCache};
 use uv_normalize::PackageName;
+use uv_warnings::warn_user_once;
 
 use crate::cached_client::CacheControl;
 use crate::html::SimpleHtml;
@@ -38,6 +40,7 @@ pub struct RegistryClientBuilder {
     retries: u32,
     connectivity: Connectivity,
     cache: Cache,
+    client: Option<Client>,
 }
 
 impl RegistryClientBuilder {
@@ -47,6 +50,7 @@ impl RegistryClientBuilder {
             cache,
             connectivity: Connectivity::Online,
             retries: 3,
+            client: None,
         }
     }
 }
@@ -76,16 +80,34 @@ impl RegistryClientBuilder {
         self
     }
 
+    #[must_use]
+    pub fn client(mut self, client: Client) -> Self {
+        self.client = Some(client);
+        self
+    }
+
     pub fn build(self) -> RegistryClient {
-        let client_raw = {
+        let client_raw = self.client.unwrap_or_else(|| {
+            // Get pip timeout from env var
+            let default_timeout = 5 * 60;
+            let timeout = env::var("UV_REQUEST_TIMEOUT")
+                .map_err(|_| default_timeout)
+                .and_then(|value| {
+                    value.parse::<u64>()
+                        .map_err(|_| {
+                            warn_user_once!("Ignoring invalid value for UV_REQUEST_TIMEOUT. Expected integer number of seconds, got {value}.");
+                            default_timeout
+                        })
+                }).unwrap_or(default_timeout);
+            debug!("Using registry request timeout of {}s", timeout);
             // Disallow any connections.
             let client_core = ClientBuilder::new()
                 .user_agent("uv")
                 .pool_max_idle_per_host(20)
-                .timeout(std::time::Duration::from_secs(60 * 5));
+                .timeout(std::time::Duration::from_secs(timeout));
 
             client_core.build().expect("Failed to build HTTP client.")
-        };
+        });
 
         let uncached_client = match self.connectivity {
             Connectivity::Online => {
@@ -160,7 +182,9 @@ impl RegistryClient {
                 Err(CachedClientError::Client(err)) => match err.into_kind() {
                     ErrorKind::Offline(_) => continue,
                     ErrorKind::RequestError(err) => {
-                        if err.status() == Some(StatusCode::NOT_FOUND) {
+                        if err.status() == Some(StatusCode::NOT_FOUND)
+                            || err.status() == Some(StatusCode::FORBIDDEN)
+                        {
                             continue;
                         }
                         Err(ErrorKind::RequestError(err).into())
@@ -454,19 +478,17 @@ impl RegistryClient {
 
         match result {
             Ok(metadata) => return Ok(metadata),
-            Err(err) => match err.into_kind() {
-                ErrorKind::AsyncHttpRangeReader(
-                    AsyncHttpRangeReaderError::HttpRangeRequestUnsupported,
-                ) => {}
-                kind => return Err(kind.into()),
-            },
+            Err(err) => {
+                if err.kind().is_http_range_requests_unsupported() {
+                    // The range request version failed. Fall back to downloading the entire file
+                    // and the reading the file from the zip the regular way.
+                    warn!("Range requests not supported for {filename}; downloading wheel");
+                } else {
+                    return Err(err);
+                }
+            }
         }
 
-        // The range request version failed (this is bad, the webserver should support this), fall
-        // back to downloading the entire file and the reading the file from the zip the regular
-        // way.
-
-        debug!("Range requests not supported for {filename}; downloading wheel");
         // TODO(konstin): Download the wheel into a cache shared with the installer instead
         // Note that this branch is only hit when you're not using and the server where
         // you host your wheels for some reasons doesn't support range requests
@@ -627,7 +649,7 @@ impl SimpleMetadata {
                 let file = match File::try_from(file, base) {
                     Ok(file) => file,
                     Err(err) => {
-                        // Ignore files with unparseable version specifiers.
+                        // Ignore files with unparsable version specifiers.
                         warn!("Skipping file for {package_name}: {err}");
                         continue;
                     }
@@ -708,8 +730,9 @@ pub enum Connectivity {
 mod tests {
     use std::str::FromStr;
 
-    use pypi_types::{JoinRelativeError, SimpleJson};
     use url::Url;
+
+    use pypi_types::{JoinRelativeError, SimpleJson};
     use uv_normalize::PackageName;
 
     use crate::{html::SimpleHtml, SimpleMetadata, SimpleMetadatum};

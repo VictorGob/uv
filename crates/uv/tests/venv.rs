@@ -20,12 +20,17 @@ fn create_venv() -> Result<()> {
 
     // Create a virtual environment at `.venv`.
     let filter_venv = regex::escape(&venv.normalized_display().to_string());
+    let filter_prompt = r"Activate with: (?:.*)\\Scripts\\activate";
     let filters = &[
         (
             r"Using Python 3\.\d+\.\d+ interpreter at .+",
             "Using Python [VERSION] interpreter at [PATH]",
         ),
         (&filter_venv, "/home/ferris/project/.venv"),
+        (
+            &filter_prompt,
+            "Activate with: source /home/ferris/project/.venv/bin/activate",
+        ),
     ];
     uv_snapshot!(filters, Command::new(get_bin())
         .arg("venv")
@@ -45,6 +50,7 @@ fn create_venv() -> Result<()> {
     ----- stderr -----
     Using Python [VERSION] interpreter at [PATH]
     Creating virtualenv at: /home/ferris/project/.venv
+    Activate with: source /home/ferris/project/.venv/bin/activate
     "###
     );
 
@@ -52,12 +58,17 @@ fn create_venv() -> Result<()> {
 
     // Create a virtual environment at the same location, which should replace it.
     let filter_venv = regex::escape(&venv.normalized_display().to_string());
+    let filter_prompt = r"Activate with: (?:.*)\\Scripts\\activate";
     let filters = &[
         (
             r"Using Python 3\.\d+\.\d+ interpreter at .+",
             "Using Python [VERSION] interpreter at [PATH]",
         ),
         (&filter_venv, "/home/ferris/project/.venv"),
+        (
+            &filter_prompt,
+            "Activate with: source /home/ferris/project/.venv/bin/activate",
+        ),
     ];
     uv_snapshot!(filters, Command::new(get_bin())
         .arg("venv")
@@ -78,6 +89,7 @@ fn create_venv() -> Result<()> {
     ----- stderr -----
     Using Python [VERSION] interpreter at [PATH]
     Creating virtualenv at: /home/ferris/project/.venv
+    Activate with: source /home/ferris/project/.venv/bin/activate
     "###
     );
 
@@ -94,12 +106,14 @@ fn create_venv_defaults_to_cwd() -> Result<()> {
     let venv = temp_dir.child(".venv");
 
     let filter_venv = regex::escape(&venv.normalized_display().to_string());
+    let filter_prompt = r"Activate with: (?:.*)\\Scripts\\activate";
     let filters = &[
         (
             r"Using Python 3\.\d+\.\d+ interpreter at .+",
             "Using Python [VERSION] interpreter at [PATH]",
         ),
         (&filter_venv, "/home/ferris/project/.venv"),
+        (&filter_prompt, "Activate with: source .venv/bin/activate"),
     ];
     uv_snapshot!(filters, Command::new(get_bin())
         .arg("venv")
@@ -119,6 +133,7 @@ fn create_venv_defaults_to_cwd() -> Result<()> {
     ----- stderr -----
     Using Python [VERSION] interpreter at [PATH]
     Creating virtualenv at: .venv
+    Activate with: source .venv/bin/activate
     "###
     );
 
@@ -135,12 +150,17 @@ fn seed() -> Result<()> {
     let venv = temp_dir.child(".venv");
 
     let filter_venv = regex::escape(&venv.normalized_display().to_string());
+    let filter_prompt = r"Activate with: (?:.*)\\Scripts\\activate";
     let filters = &[
         (
             r"Using Python 3\.\d+\.\d+ interpreter at .+",
             "Using Python [VERSION] interpreter at [PATH]",
         ),
         (&filter_venv, "/home/ferris/project/.venv"),
+        (
+            &filter_prompt,
+            "Activate with: source /home/ferris/project/.venv/bin/activate",
+        ),
     ];
     uv_snapshot!(filters, Command::new(get_bin())
         .arg("venv")
@@ -162,9 +182,60 @@ fn seed() -> Result<()> {
     ----- stderr -----
     Using Python [VERSION] interpreter at [PATH]
     Creating virtualenv at: /home/ferris/project/.venv
+     + pip==23.3.1
+    Activate with: source /home/ferris/project/.venv/bin/activate
+    "###
+    );
+
+    venv.assert(predicates::path::is_dir());
+
+    Ok(())
+}
+
+#[test]
+fn seed_older_python_version() -> Result<()> {
+    let temp_dir = assert_fs::TempDir::new()?;
+    let cache_dir = assert_fs::TempDir::new()?;
+    let bin = create_bin_with_executables(&temp_dir, &["3.10"]).expect("Failed to create bin dir");
+    let venv = temp_dir.child(".venv");
+
+    let filter_venv = regex::escape(&venv.normalized_display().to_string());
+    let filter_prompt = r"Activate with: (?:.*)\\Scripts\\activate";
+    let filters = &[
+        (
+            r"Using Python 3\.\d+\.\d+ interpreter at .+",
+            "Using Python [VERSION] interpreter at [PATH]",
+        ),
+        (&filter_venv, "/home/ferris/project/.venv"),
+        (
+            &filter_prompt,
+            "Activate with: source /home/ferris/project/.venv/bin/activate",
+        ),
+    ];
+    uv_snapshot!(filters, Command::new(get_bin())
+        .arg("venv")
+        .arg(venv.as_os_str())
+        .arg("--seed")
+        .arg("--python")
+        .arg("3.10")
+        .arg("--cache-dir")
+        .arg(cache_dir.path())
+        .arg("--exclude-newer")
+        .arg(EXCLUDE_NEWER)
+        .env("UV_NO_WRAP", "1")
+        .env("UV_TEST_PYTHON_PATH", bin)
+        .current_dir(&temp_dir), @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Using Python [VERSION] interpreter at [PATH]
+    Creating virtualenv at: /home/ferris/project/.venv
      + setuptools==68.2.2
      + pip==23.3.1
      + wheel==0.41.3
+    Activate with: source /home/ferris/project/.venv/bin/activate
     "###
     );
 
@@ -273,9 +344,14 @@ fn create_venv_python_patch() -> Result<()> {
     let venv = temp_dir.child(".venv");
 
     let filter_venv = regex::escape(&venv.normalized_display().to_string());
+    let filter_prompt = r"Activate with: (?:.*)\\Scripts\\activate";
     let filters = &[
         (r"interpreter at .+", "interpreter at [PATH]"),
         (&filter_venv, "/home/ferris/project/.venv"),
+        (
+            &filter_prompt,
+            "Activate with: source /home/ferris/project/.venv/bin/activate",
+        ),
     ];
     uv_snapshot!(filters, Command::new(get_bin())
         .arg("venv")
@@ -362,12 +438,17 @@ fn empty_dir_exists() -> Result<()> {
     venv.create_dir_all()?;
 
     let filter_venv = regex::escape(&venv.normalized_display().to_string());
+    let filter_prompt = r"Activate with: (?:.*)\\Scripts\\activate";
     let filters = &[
         (
             r"Using Python 3\.\d+\.\d+ interpreter at .+",
             "Using Python [VERSION] interpreter at [PATH]",
         ),
         (&filter_venv, "/home/ferris/project/.venv"),
+        (
+            &filter_prompt,
+            "Activate with: source /home/ferris/project/.venv/bin/activate",
+        ),
     ];
     uv_snapshot!(filters, Command::new(get_bin())
         .arg("venv")
@@ -388,6 +469,7 @@ fn empty_dir_exists() -> Result<()> {
     ----- stderr -----
     Using Python [VERSION] interpreter at [PATH]
     Creating virtualenv at: /home/ferris/project/.venv
+    Activate with: source /home/ferris/project/.venv/bin/activate
     "###
     );
 
@@ -453,12 +535,17 @@ fn virtualenv_compatibility() -> Result<()> {
 
     // Create a virtual environment at `.venv`, passing the redundant `--clear` flag.
     let filter_venv = regex::escape(&venv.normalized_display().to_string());
+    let filter_prompt = r"Activate with: (?:.*)\\Scripts\\activate";
     let filters = &[
         (
             r"Using Python 3\.\d+\.\d+ interpreter at .+",
             "Using Python [VERSION] interpreter at [PATH]",
         ),
         (&filter_venv, "/home/ferris/project/.venv"),
+        (
+            &filter_prompt,
+            "Activate with: source /home/ferris/project/.venv/bin/activate",
+        ),
     ];
     uv_snapshot!(filters, Command::new(get_bin())
         .arg("venv")
@@ -480,6 +567,7 @@ fn virtualenv_compatibility() -> Result<()> {
     warning: virtualenv's `--clear` has no effect (uv always clears the virtual environment).
     Using Python [VERSION] interpreter at [PATH]
     Creating virtualenv at: /home/ferris/project/.venv
+    Activate with: source /home/ferris/project/.venv/bin/activate
     "###
     );
 

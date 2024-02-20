@@ -153,8 +153,9 @@ impl<'a> FlatIndexClient<'a> {
             .map_err(ErrorKind::RequestError)?;
         let parse_simple_response = |response: Response| {
             async {
+                let url = response.url().clone();
                 let text = response.text().await.map_err(ErrorKind::RequestError)?;
-                let SimpleHtml { base, files } = SimpleHtml::parse(&text, url)
+                let SimpleHtml { base, files } = SimpleHtml::parse(&text, &url)
                     .map_err(|err| Error::from_html_err(err, url.clone()))?;
 
                 let files: Vec<File> = files
@@ -163,7 +164,7 @@ impl<'a> FlatIndexClient<'a> {
                         match File::try_from(file, base.as_url().as_str()) {
                             Ok(file) => Some(file),
                             Err(err) => {
-                                // Ignore files with unparseable version specifiers.
+                                // Ignore files with unparsable version specifiers.
                                 warn!("Skipping file in {url}: {err}");
                                 None
                             }
@@ -228,7 +229,7 @@ impl<'a> FlatIndexClient<'a> {
             let file = File {
                 dist_info_metadata: None,
                 filename: filename.to_string(),
-                hashes: Hashes { sha256: None },
+                hashes: Hashes::default(),
                 requires_python: None,
                 size: None,
                 upload_time_utc_ms: None,

@@ -52,6 +52,29 @@ fn missing_requirements_txt() {
 }
 
 #[test]
+fn empty_requirements_txt() -> Result<()> {
+    let context = TestContext::new("3.12");
+    let requirements_txt = context.temp_dir.child("requirements.txt");
+    requirements_txt.touch()?;
+
+    uv_snapshot!(command(&context)
+        .arg("-r")
+        .arg("requirements.txt")
+        .arg("--strict"), @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    warning: Requirements file requirements.txt does not contain any dependencies
+    Audited 0 packages in [TIME]
+    "###
+    );
+
+    Ok(())
+}
+
+#[test]
 fn no_solution() {
     let context = TestContext::new("3.12");
 
@@ -290,6 +313,67 @@ fn respect_installed_and_reinstall() -> Result<()> {
      + flask==3.0.0
     "###
     );
+
+    Ok(())
+}
+
+/// Respect installed versions when resolving.
+#[test]
+fn reinstall_extras() -> Result<()> {
+    let context = TestContext::new("3.12");
+
+    // Install httpx.
+    let requirements_txt = context.temp_dir.child("requirements.txt");
+    requirements_txt.write_str("httpx")?;
+
+    uv_snapshot!(command(&context)
+        .arg("-r")
+        .arg("requirements.txt")
+        .arg("--strict"), @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 7 packages in [TIME]
+    Downloaded 7 packages in [TIME]
+    Installed 7 packages in [TIME]
+     + anyio==4.0.0
+     + certifi==2023.11.17
+     + h11==0.14.0
+     + httpcore==1.0.2
+     + httpx==0.25.1
+     + idna==3.4
+     + sniffio==1.3.0
+    "###
+    );
+
+    context.assert_command("import httpx").success();
+
+    // Re-install httpx, with an extra.
+    let requirements_txt = context.temp_dir.child("requirements.txt");
+    requirements_txt.touch()?;
+    requirements_txt.write_str("httpx[http2]")?;
+
+    uv_snapshot!(command(&context)
+        .arg("-r")
+        .arg("requirements.txt")
+        .arg("--strict"), @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 10 packages in [TIME]
+    Downloaded 3 packages in [TIME]
+    Installed 3 packages in [TIME]
+     + h2==4.1.0
+     + hpack==4.0.0
+     + hyperframe==6.0.1
+    "###
+    );
+
+    context.assert_command("import httpx").success();
 
     Ok(())
 }
@@ -1011,4 +1095,163 @@ fn install_upgrade() {
      + httpcore==1.0.2
     "###
     );
+}
+
+/// Install a package from a `requirements.txt` file, with a `constraints.txt` file.
+#[test]
+fn install_constraints_txt() -> Result<()> {
+    let context = TestContext::new("3.12");
+    let requirementstxt = context.temp_dir.child("requirements.txt");
+    requirementstxt.write_str("django==5.0b1")?;
+
+    let constraints_txt = context.temp_dir.child("constraints.txt");
+    constraints_txt.write_str("sqlparse<0.4.4")?;
+
+    uv_snapshot!(command(&context)
+            .arg("-r")
+            .arg("requirements.txt")
+            .arg("--constraint")
+            .arg("constraints.txt"), @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Downloaded 3 packages in [TIME]
+    Installed 3 packages in [TIME]
+     + asgiref==3.7.2
+     + django==5.0b1
+     + sqlparse==0.4.3
+    "###
+    );
+
+    Ok(())
+}
+
+/// Install a package from a `requirements.txt` file, with an inline constraint.
+#[test]
+fn install_constraints_inline() -> Result<()> {
+    let context = TestContext::new("3.12");
+    let requirementstxt = context.temp_dir.child("requirements.txt");
+    requirementstxt.write_str("django==5.0b1\n-c constraints.txt")?;
+
+    let constraints_txt = context.temp_dir.child("constraints.txt");
+    constraints_txt.write_str("sqlparse<0.4.4")?;
+
+    uv_snapshot!(command(&context)
+            .arg("-r")
+            .arg("requirements.txt"), @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Downloaded 3 packages in [TIME]
+    Installed 3 packages in [TIME]
+     + asgiref==3.7.2
+     + django==5.0b1
+     + sqlparse==0.4.3
+    "###
+    );
+
+    Ok(())
+}
+
+/// Tests that we can install `polars==0.14.0`, which has this odd dependency
+/// requirement in its wheel metadata: `pyarrow>=4.0.*; extra == 'pyarrow'`.
+///
+/// The `>=4.0.*` is invalid, but is something we "fix" because it is out
+/// of the control of the end user. However, our fix for this case ends up
+/// stripping the quotes around `pyarrow` and thus produces an irrevocably
+/// invalid dependency requirement.
+///
+/// See: <https://github.com/astral-sh/uv/issues/1477>
+#[test]
+fn install_pinned_polars_invalid_metadata() {
+    let context = TestContext::new("3.12");
+
+    // Install Flask.
+    uv_snapshot!(command(&context)
+        .arg("polars==0.14.0"),
+        @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Downloaded 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + polars==0.14.0
+    "###
+    );
+
+    context.assert_command("import polars").success();
+}
+
+/// Install a source distribution with `--resolution=lowest-direct`, to ensure that the build
+/// requirements aren't resolved at their lowest compatible version.
+#[test]
+fn install_sdist_resolution_lowest() -> Result<()> {
+    let context = TestContext::new("3.12");
+    let requirements_in = context.temp_dir.child("requirements.in");
+    requirements_in.write_str("anyio @ https://files.pythonhosted.org/packages/2d/b8/7333d87d5f03247215d86a86362fd3e324111788c6cdd8d2e6196a6ba833/anyio-4.2.0.tar.gz")?;
+
+    uv_snapshot!(command(&context)
+            .arg("-r")
+            .arg("requirements.in")
+            .arg("--resolution=lowest-direct"), @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Downloaded 3 packages in [TIME]
+    Installed 3 packages in [TIME]
+     + anyio==4.2.0 (from https://files.pythonhosted.org/packages/2d/b8/7333d87d5f03247215d86a86362fd3e324111788c6cdd8d2e6196a6ba833/anyio-4.2.0.tar.gz)
+     + idna==3.4
+     + sniffio==1.3.0
+    "###
+    );
+
+    Ok(())
+}
+
+/// Tests that we can install a package from a zip file that has bunk
+/// permissions.
+///
+/// See: <https://github.com/astral-sh/uv/issues/1453>
+#[test]
+fn direct_url_zip_file_bunk_permissions() -> Result<()> {
+    let context = TestContext::new("3.12");
+    let requirements_txt = context.temp_dir.child("requirements.txt");
+    requirements_txt.write_str(
+        "opensafely-pipeline @ https://github.com/opensafely-core/pipeline/archive/refs/tags/v2023.11.06.145820.zip",
+    )?;
+
+    uv_snapshot!(command(&context)
+        .arg("-r")
+        .arg("requirements.txt")
+        .arg("--strict"), @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 6 packages in [TIME]
+    Downloaded 5 packages in [TIME]
+    Installed 6 packages in [TIME]
+     + distro==1.8.0
+     + opensafely-pipeline==2023.11.6.145820 (from https://github.com/opensafely-core/pipeline/archive/refs/tags/v2023.11.06.145820.zip)
+     + pydantic==1.10.13
+     + ruyaml==0.91.0
+     + setuptools==68.2.2
+     + typing-extensions==4.8.0
+    "###
+    );
+
+    Ok(())
 }

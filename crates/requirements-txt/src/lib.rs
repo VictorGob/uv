@@ -40,11 +40,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{instrument, warn};
 use unscanny::{Pattern, Scanner};
 use url::Url;
+use uv_warnings::warn_user;
 
-use pep508_rs::{split_scheme, Extras, Pep508Error, Pep508ErrorSource, Requirement, VerbatimUrl};
+use pep508_rs::{
+    split_scheme, Extras, Pep508Error, Pep508ErrorSource, Requirement, Scheme, VerbatimUrl,
+};
 use uv_fs::{normalize_url_path, Normalized};
 use uv_normalize::ExtraName;
 
@@ -92,24 +95,39 @@ impl FindLink {
     /// - `https://download.pytorch.org/whl/torch_stable.html`
     pub fn parse(given: &str, working_dir: impl AsRef<Path>) -> Result<Self, url::ParseError> {
         if let Some((scheme, path)) = split_scheme(given) {
-            if scheme == "file" {
+            match Scheme::parse(scheme) {
                 // Ex) `file:///home/ferris/project/scripts/...` or `file:../ferris/`
-                let path = path.strip_prefix("//").unwrap_or(path);
+                Some(Scheme::File) => {
+                    let path = path.strip_prefix("//").unwrap_or(path);
 
-                // Transform, e.g., `/C:/Users/ferris/wheel-0.42.0.tar.gz` to `C:\Users\ferris\wheel-0.42.0.tar.gz`.
-                let path = normalize_url_path(path);
+                    // Transform, e.g., `/C:/Users/ferris/wheel-0.42.0.tar.gz` to `C:\Users\ferris\wheel-0.42.0.tar.gz`.
+                    let path = normalize_url_path(path);
 
-                let path = PathBuf::from(path.as_ref());
-                let path = if path.is_absolute() {
-                    path
-                } else {
-                    working_dir.as_ref().join(path)
-                };
-                Ok(Self::Path(path))
-            } else {
+                    let path = PathBuf::from(path.as_ref());
+                    let path = if path.is_absolute() {
+                        path
+                    } else {
+                        working_dir.as_ref().join(path)
+                    };
+                    Ok(Self::Path(path))
+                }
+
                 // Ex) `https://download.pytorch.org/whl/torch_stable.html`
-                let url = Url::parse(given)?;
-                Ok(Self::Url(url))
+                Some(_) => {
+                    let url = Url::parse(given)?;
+                    Ok(Self::Url(url))
+                }
+
+                // Ex) `C:/Users/ferris/wheel-0.42.0.tar.gz`
+                _ => {
+                    let path = PathBuf::from(given);
+                    let path = if path.is_absolute() {
+                        path
+                    } else {
+                        working_dir.as_ref().join(path)
+                    };
+                    Ok(Self::Path(path))
+                }
             }
         } else {
             // Ex) `../ferris/`
@@ -189,19 +207,26 @@ impl EditableRequirement {
 
         // Create a `VerbatimUrl` to represent the editable requirement.
         let url = if let Some((scheme, path)) = split_scheme(requirement) {
-            if scheme == "file" {
+            match Scheme::parse(scheme) {
                 // Ex) `file:///home/ferris/project/scripts/...` or `file:../editable/`
-                let path = path.strip_prefix("//").unwrap_or(path);
+                Some(Scheme::File) => {
+                    let path = path.strip_prefix("//").unwrap_or(path);
 
-                // Transform, e.g., `/C:/Users/ferris/wheel-0.42.0.tar.gz` to `C:\Users\ferris\wheel-0.42.0.tar.gz`.
-                let path = normalize_url_path(path);
+                    // Transform, e.g., `/C:/Users/ferris/wheel-0.42.0.tar.gz` to `C:\Users\ferris\wheel-0.42.0.tar.gz`.
+                    let path = normalize_url_path(path);
 
-                VerbatimUrl::from_path(path, working_dir.as_ref())
-            } else {
+                    VerbatimUrl::from_path(path, working_dir.as_ref())
+                }
+
                 // Ex) `https://download.pytorch.org/whl/torch_stable.html`
-                return Err(RequirementsTxtParserError::UnsupportedUrl(
-                    requirement.to_string(),
-                ));
+                Some(_) => {
+                    return Err(RequirementsTxtParserError::UnsupportedUrl(
+                        requirement.to_string(),
+                    ));
+                }
+
+                // Ex) `C:/Users/ferris/wheel-0.42.0.tar.gz`
+                _ => VerbatimUrl::from_path(requirement, working_dir.as_ref()),
             }
         } else {
             // Ex) `../editable/`
@@ -294,6 +319,7 @@ pub struct RequirementsTxt {
 
 impl RequirementsTxt {
     /// See module level documentation
+    #[instrument(skip_all, fields(requirements_txt = requirements_txt.as_ref().as_os_str().to_str()))]
     pub fn parse(
         requirements_txt: impl AsRef<Path>,
         working_dir: impl AsRef<Path>,
@@ -314,11 +340,12 @@ impl RequirementsTxt {
         })?;
         println!("*** data: {:?}", data);
         if data == Self::default() {
-            warn!(
+            warn_user!(
                 "Requirements file {} does not contain any dependencies",
                 requirements_txt.as_ref().display()
             );
         }
+
         Ok(data)
     }
 

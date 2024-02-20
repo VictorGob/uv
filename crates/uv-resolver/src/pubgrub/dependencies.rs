@@ -1,10 +1,10 @@
 use itertools::Itertools;
-use pep440_rs::Version;
 use pubgrub::range::Range;
 use pubgrub::type_aliases::DependencyConstraints;
 use tracing::warn;
 
-use pep508_rs::{MarkerEnvironment, Requirement, VersionOrUrl};
+use pep440_rs::Version;
+use pep508_rs::{MarkerEnvironment, Requirement, VerbatimUrl, VersionOrUrl};
 use uv_normalize::{ExtraName, PackageName};
 
 use crate::overrides::Overrides;
@@ -21,22 +21,17 @@ impl PubGrubDependencies {
         requirements: &[Requirement],
         constraints: &[Requirement],
         overrides: &Overrides,
-        extra: Option<&ExtraName>,
-        source: Option<&PackageName>,
+        source_name: Option<&PackageName>,
+        source_url: Option<&VerbatimUrl>,
+        source_extra: Option<&ExtraName>,
         env: &MarkerEnvironment,
     ) -> Result<Self, ResolveError> {
         let mut dependencies = DependencyConstraints::<PubGrubPackage, Range<Version>>::default();
 
         // Iterate over all declared requirements.
         for requirement in overrides.apply(requirements) {
-            // Avoid self-dependencies.
-            if source.is_some_and(|source| source == &requirement.name) {
-                warn!("{} has a dependency on itself", requirement.name);
-                continue;
-            }
-
             // If the requirement isn't relevant for the current platform, skip it.
-            if let Some(extra) = extra {
+            if let Some(extra) = source_extra {
                 if !requirement.evaluate_markers(env, std::slice::from_ref(extra)) {
                     continue;
                 }
@@ -54,7 +49,22 @@ impl PubGrubDependencies {
                     .into_iter()
                     .map(|extra| to_pubgrub(requirement, Some(extra))),
             ) {
-                let (package, version) = result?;
+                let (mut package, version) = result?;
+
+                // Detect self-dependencies.
+                if let PubGrubPackage::Package(name, extra, url) = &mut package {
+                    if source_name.is_some_and(|source_name| source_name == name) {
+                        // Allow, e.g., `black` to depend on `black[colorama]`.
+                        if source_extra == extra.as_ref() {
+                            warn!("{name} has a dependency on itself");
+                            continue;
+                        }
+                        // Propagate the source URL.
+                        if source_url.is_some() {
+                            *url = source_url.cloned();
+                        }
+                    }
+                }
 
                 if let Some(entry) = dependencies.get_key_value(&package) {
                     // Merge the versions.
@@ -80,14 +90,8 @@ impl PubGrubDependencies {
                 continue;
             }
 
-            // Avoid self-dependencies.
-            if source.is_some_and(|source| source == &constraint.name) {
-                warn!("{} has a dependency on itself", constraint.name);
-                continue;
-            }
-
             // If the requirement isn't relevant for the current platform, skip it.
-            if let Some(extra) = extra {
+            if let Some(extra) = source_extra {
                 if !constraint.evaluate_markers(env, std::slice::from_ref(extra)) {
                     continue;
                 }
@@ -105,7 +109,22 @@ impl PubGrubDependencies {
                     .into_iter()
                     .map(|extra| to_pubgrub(constraint, Some(extra))),
             ) {
-                let (package, version) = result?;
+                let (mut package, version) = result?;
+
+                // Detect self-dependencies.
+                if let PubGrubPackage::Package(name, extra, url) = &mut package {
+                    if source_name.is_some_and(|source_name| source_name == name) {
+                        // Allow, e.g., `black` to depend on `black[colorama]`.
+                        if source_extra == extra.as_ref() {
+                            warn!("{name} has a dependency on itself");
+                            continue;
+                        }
+                        // Propagate the source URL.
+                        if source_url.is_some() {
+                            *url = source_url.cloned();
+                        }
+                    }
+                }
 
                 if let Some(entry) = dependencies.get_key_value(&package) {
                     // Merge the versions.
@@ -113,6 +132,7 @@ impl PubGrubDependencies {
 
                     // Merge the package.
                     if let Some(package) = merge_package(entry.0, &package)? {
+                        dependencies.remove(&package);
                         dependencies.insert(package, version);
                     } else {
                         dependencies.insert(package, version);

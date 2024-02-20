@@ -41,7 +41,7 @@ use url::Url;
 
 use distribution_filename::{DistFilename, SourceDistFilename, WheelFilename};
 use pep440_rs::Version;
-use pep508_rs::VerbatimUrl;
+use pep508_rs::{Scheme, VerbatimUrl};
 use uv_normalize::PackageName;
 
 pub use crate::any::*;
@@ -96,7 +96,7 @@ impl std::fmt::Display for VersionOrUrl<'_> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstalledVersion<'a> {
     /// A PEP 440 version specifier, used to identify a distribution in a registry.
     Version(&'a Version),
@@ -223,56 +223,108 @@ impl Dist {
 
     /// Create a [`Dist`] for a URL-based distribution.
     pub fn from_url(name: PackageName, url: VerbatimUrl) -> Result<Self, Error> {
-        if url.scheme().starts_with("git+") {
-            return Ok(Self::Source(SourceDist::Git(GitSourceDist { name, url })));
-        }
-
-        if url.scheme().eq_ignore_ascii_case("file") {
-            // Store the canonicalized path, which also serves to validate that it exists.
-            let path = match url
-                .to_file_path()
-                .map_err(|()| Error::UrlFilename(url.to_url()))?
-                .canonicalize()
-            {
-                Ok(path) => path,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(Error::NotFound(url.to_url()));
+        match Scheme::parse(url.scheme()) {
+            Some(Scheme::Http | Scheme::Https) => {
+                if Path::new(url.path())
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("whl"))
+                {
+                    Ok(Self::Built(BuiltDist::DirectUrl(DirectUrlBuiltDist {
+                        filename: WheelFilename::from_str(&url.filename()?)?,
+                        url,
+                    })))
+                } else {
+                    Ok(Self::Source(SourceDist::DirectUrl(DirectUrlSourceDist {
+                        name,
+                        url,
+                    })))
                 }
-                Err(err) => return Err(err.into()),
-            };
+            }
+            Some(Scheme::File) => {
+                // Store the canonicalized path, which also serves to validate that it exists.
+                let path = match url
+                    .to_file_path()
+                    .map_err(|()| Error::UrlFilename(url.to_url()))?
+                    .canonicalize()
+                {
+                    Ok(path) => path,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(Error::NotFound(url.to_url()));
+                    }
+                    Err(err) => return Err(err.into()),
+                };
 
-            return if path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("whl"))
-            {
-                Ok(Self::Built(BuiltDist::Path(PathBuiltDist {
-                    filename: WheelFilename::from_str(url.filename()?)?,
-                    url,
-                    path,
-                })))
-            } else {
-                Ok(Self::Source(SourceDist::Path(PathSourceDist {
-                    name,
-                    url,
-                    path,
-                    editable: false,
-                })))
-            };
-        }
-
-        if Path::new(url.path())
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("whl"))
-        {
-            Ok(Self::Built(BuiltDist::DirectUrl(DirectUrlBuiltDist {
-                filename: WheelFilename::from_str(url.filename()?)?,
-                url,
-            })))
-        } else {
-            Ok(Self::Source(SourceDist::DirectUrl(DirectUrlSourceDist {
-                name,
-                url,
-            })))
+                if path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("whl"))
+                {
+                    Ok(Self::Built(BuiltDist::Path(PathBuiltDist {
+                        filename: WheelFilename::from_str(&url.filename()?)?,
+                        url,
+                        path,
+                    })))
+                } else {
+                    Ok(Self::Source(SourceDist::Path(PathSourceDist {
+                        name,
+                        url,
+                        path,
+                        editable: false,
+                    })))
+                }
+            }
+            Some(Scheme::GitSsh | Scheme::GitHttps) => {
+                Ok(Self::Source(SourceDist::Git(GitSourceDist { name, url })))
+            }
+            Some(Scheme::GitGit | Scheme::GitHttp) => Err(Error::UnsupportedScheme(
+                url.scheme().to_owned(),
+                url.verbatim().to_string(),
+                "insecure Git protocol".to_string(),
+            )),
+            Some(Scheme::GitFile) => Err(Error::UnsupportedScheme(
+                url.scheme().to_owned(),
+                url.verbatim().to_string(),
+                "local Git protocol".to_string(),
+            )),
+            Some(
+                Scheme::BzrHttp
+                | Scheme::BzrHttps
+                | Scheme::BzrSsh
+                | Scheme::BzrSftp
+                | Scheme::BzrFtp
+                | Scheme::BzrLp
+                | Scheme::BzrFile,
+            ) => Err(Error::UnsupportedScheme(
+                url.scheme().to_owned(),
+                url.verbatim().to_string(),
+                "Bazaar is not supported".to_string(),
+            )),
+            Some(
+                Scheme::HgFile
+                | Scheme::HgHttp
+                | Scheme::HgHttps
+                | Scheme::HgSsh
+                | Scheme::HgStaticHttp,
+            ) => Err(Error::UnsupportedScheme(
+                url.scheme().to_owned(),
+                url.verbatim().to_string(),
+                "Mercurial is not supported".to_string(),
+            )),
+            Some(
+                Scheme::SvnSsh
+                | Scheme::SvnHttp
+                | Scheme::SvnHttps
+                | Scheme::SvnSvn
+                | Scheme::SvnFile,
+            ) => Err(Error::UnsupportedScheme(
+                url.scheme().to_owned(),
+                url.verbatim().to_string(),
+                "Subversion is not supported".to_string(),
+            )),
+            None => Err(Error::UnsupportedScheme(
+                url.scheme().to_owned(),
+                url.verbatim().to_string(),
+                "unknown scheme".to_string(),
+            )),
         }
     }
 
@@ -498,8 +550,8 @@ impl DistributionMetadata for Dist {
 }
 
 impl RemoteSource for File {
-    fn filename(&self) -> Result<&str, Error> {
-        Ok(&self.filename)
+    fn filename(&self) -> Result<Cow<'_, str>, Error> {
+        Ok(Cow::Borrowed(&self.filename))
     }
 
     fn size(&self) -> Option<u64> {
@@ -508,10 +560,17 @@ impl RemoteSource for File {
 }
 
 impl RemoteSource for Url {
-    fn filename(&self) -> Result<&str, Error> {
-        self.path_segments()
+    fn filename(&self) -> Result<Cow<'_, str>, Error> {
+        // Identify the last segment of the URL as the filename.
+        let filename = self
+            .path_segments()
             .and_then(Iterator::last)
-            .ok_or_else(|| Error::UrlFilename(self.clone()))
+            .ok_or_else(|| Error::UrlFilename(self.clone()))?;
+
+        // Decode the filename, which may be percent-encoded.
+        let filename = urlencoding::decode(filename)?;
+
+        Ok(filename)
     }
 
     fn size(&self) -> Option<u64> {
@@ -520,7 +579,7 @@ impl RemoteSource for Url {
 }
 
 impl RemoteSource for RegistryBuiltDist {
-    fn filename(&self) -> Result<&str, Error> {
+    fn filename(&self) -> Result<Cow<'_, str>, Error> {
         self.file.filename()
     }
 
@@ -530,7 +589,7 @@ impl RemoteSource for RegistryBuiltDist {
 }
 
 impl RemoteSource for RegistrySourceDist {
-    fn filename(&self) -> Result<&str, Error> {
+    fn filename(&self) -> Result<Cow<'_, str>, Error> {
         self.file.filename()
     }
 
@@ -540,7 +599,7 @@ impl RemoteSource for RegistrySourceDist {
 }
 
 impl RemoteSource for DirectUrlBuiltDist {
-    fn filename(&self) -> Result<&str, Error> {
+    fn filename(&self) -> Result<Cow<'_, str>, Error> {
         self.url.filename()
     }
 
@@ -550,7 +609,7 @@ impl RemoteSource for DirectUrlBuiltDist {
 }
 
 impl RemoteSource for DirectUrlSourceDist {
-    fn filename(&self) -> Result<&str, Error> {
+    fn filename(&self) -> Result<Cow<'_, str>, Error> {
         self.url.filename()
     }
 
@@ -560,12 +619,24 @@ impl RemoteSource for DirectUrlSourceDist {
 }
 
 impl RemoteSource for GitSourceDist {
-    fn filename(&self) -> Result<&str, Error> {
-        self.url.filename().map(|filename| {
-            filename
-                .rsplit_once('@')
-                .map_or(filename, |(_, filename)| filename)
-        })
+    fn filename(&self) -> Result<Cow<'_, str>, Error> {
+        // The filename is the last segment of the URL, before any `@`.
+        match self.url.filename()? {
+            Cow::Borrowed(filename) => {
+                if let Some((_, filename)) = filename.rsplit_once('@') {
+                    Ok(Cow::Borrowed(filename))
+                } else {
+                    Ok(Cow::Borrowed(filename))
+                }
+            }
+            Cow::Owned(filename) => {
+                if let Some((_, filename)) = filename.rsplit_once('@') {
+                    Ok(Cow::Owned(filename.to_owned()))
+                } else {
+                    Ok(Cow::Owned(filename))
+                }
+            }
+        }
     }
 
     fn size(&self) -> Option<u64> {
@@ -574,7 +645,7 @@ impl RemoteSource for GitSourceDist {
 }
 
 impl RemoteSource for PathBuiltDist {
-    fn filename(&self) -> Result<&str, Error> {
+    fn filename(&self) -> Result<Cow<'_, str>, Error> {
         self.url.filename()
     }
 
@@ -584,7 +655,7 @@ impl RemoteSource for PathBuiltDist {
 }
 
 impl RemoteSource for PathSourceDist {
-    fn filename(&self) -> Result<&str, Error> {
+    fn filename(&self) -> Result<Cow<'_, str>, Error> {
         self.url.filename()
     }
 
@@ -594,7 +665,7 @@ impl RemoteSource for PathSourceDist {
 }
 
 impl RemoteSource for SourceDist {
-    fn filename(&self) -> Result<&str, Error> {
+    fn filename(&self) -> Result<Cow<'_, str>, Error> {
         match self {
             Self::Registry(dist) => dist.filename(),
             Self::DirectUrl(dist) => dist.filename(),
@@ -614,7 +685,7 @@ impl RemoteSource for SourceDist {
 }
 
 impl RemoteSource for BuiltDist {
-    fn filename(&self) -> Result<&str, Error> {
+    fn filename(&self) -> Result<Cow<'_, str>, Error> {
         match self {
             Self::Registry(dist) => dist.filename(),
             Self::DirectUrl(dist) => dist.filename(),
@@ -632,7 +703,7 @@ impl RemoteSource for BuiltDist {
 }
 
 impl RemoteSource for Dist {
-    fn filename(&self) -> Result<&str, Error> {
+    fn filename(&self) -> Result<Cow<'_, str>, Error> {
         match self {
             Self::Built(dist) => dist.filename(),
             Self::Source(dist) => dist.filename(),
@@ -659,7 +730,7 @@ impl Identifier for Url {
 
 impl Identifier for File {
     fn distribution_id(&self) -> DistributionId {
-        if let Some(hash) = &self.hashes.sha256 {
+        if let Some(hash) = self.hashes.as_str() {
             DistributionId::new(hash)
         } else {
             self.url.distribution_id()
@@ -667,7 +738,7 @@ impl Identifier for File {
     }
 
     fn resource_id(&self) -> ResourceId {
-        if let Some(hash) = &self.hashes.sha256 {
+        if let Some(hash) = self.hashes.as_str() {
             ResourceId::new(hash)
         } else {
             self.url.resource_id()

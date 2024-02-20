@@ -14,7 +14,7 @@
 //! assert_eq!(dependency_specification.extras, vec![ExtraName::from_str("security").unwrap(), ExtraName::from_str("tests").unwrap()]);
 //! ```
 
-#![deny(missing_docs)]
+#![warn(missing_docs)]
 
 #[cfg(feature = "pyo3")]
 use std::collections::hash_map::DefaultHasher;
@@ -46,7 +46,7 @@ use uv_fs::normalize_url_path;
 #[cfg(feature = "pyo3")]
 use uv_normalize::InvalidNameError;
 use uv_normalize::{ExtraName, PackageName};
-pub use verbatim_url::{split_scheme, VerbatimUrl};
+pub use verbatim_url::{split_scheme, Scheme, VerbatimUrl};
 
 mod marker;
 mod verbatim_url;
@@ -738,56 +738,80 @@ fn parse_url(cursor: &mut Cursor, working_dir: Option<&Path>) -> Result<Verbatim
 /// Create a `VerbatimUrl` to represent the requirement.
 fn preprocess_url(
     url: &str,
-    working_dir: Option<&Path>,
+    #[cfg_attr(not(feature = "non-pep508-extensions"), allow(unused))] working_dir: Option<&Path>,
     cursor: &Cursor,
     start: usize,
     len: usize,
 ) -> Result<VerbatimUrl, Pep508Error> {
-    let url = if let Some((scheme, path)) = split_scheme(url) {
-        if scheme == "file" {
+    if let Some((scheme, path)) = split_scheme(url) {
+        match Scheme::parse(scheme) {
             // Ex) `file:///home/ferris/project/scripts/...` or `file:../editable/`.
-            let path = path.strip_prefix("//").unwrap_or(path);
+            Some(Scheme::File) => {
+                let path = path.strip_prefix("//").unwrap_or(path);
 
-            // Transform, e.g., `/C:/Users/ferris/wheel-0.42.0.tar.gz` to `C:\Users\ferris\wheel-0.42.0.tar.gz`.
-            let path = normalize_url_path(path);
+                // Transform, e.g., `/C:/Users/ferris/wheel-0.42.0.tar.gz` to `C:\Users\ferris\wheel-0.42.0.tar.gz`.
+                let path = normalize_url_path(path);
 
-            if let Some(working_dir) = working_dir {
-                VerbatimUrl::from_path(path, working_dir).with_given(url.to_string())
-            } else {
-                VerbatimUrl::from_absolute_path(path)
+                #[cfg(feature = "non-pep508-extensions")]
+                if let Some(working_dir) = working_dir {
+                    return Ok(
+                        VerbatimUrl::from_path(path, working_dir).with_given(url.to_string())
+                    );
+                }
+
+                Ok(VerbatimUrl::from_absolute_path(path)
                     .map_err(|err| Pep508Error {
                         message: Pep508ErrorSource::UrlError(err),
                         start,
                         len,
                         input: cursor.to_string(),
                     })?
-                    .with_given(url.to_string())
+                    .with_given(url.to_string()))
             }
-        } else {
             // Ex) `https://download.pytorch.org/whl/torch_stable.html`
-            VerbatimUrl::from_str(url).map_err(|err| Pep508Error {
+            Some(_) => {
+                // Ex) `https://download.pytorch.org/whl/torch_stable.html`
+                Ok(VerbatimUrl::from_str(url).map_err(|err| Pep508Error {
+                    message: Pep508ErrorSource::UrlError(err),
+                    start,
+                    len,
+                    input: cursor.to_string(),
+                })?)
+            }
+
+            // Ex) `C:\Users\ferris\wheel-0.42.0.tar.gz`
+            _ => {
+                #[cfg(feature = "non-pep508-extensions")]
+                if let Some(working_dir) = working_dir {
+                    return Ok(VerbatimUrl::from_path(url, working_dir).with_given(url.to_string()));
+                }
+
+                Ok(VerbatimUrl::from_absolute_path(url)
+                    .map_err(|err| Pep508Error {
+                        message: Pep508ErrorSource::UrlError(err),
+                        start,
+                        len,
+                        input: cursor.to_string(),
+                    })?
+                    .with_given(url.to_string()))
+            }
+        }
+    } else {
+        // Ex) `../editable/`
+        #[cfg(feature = "non-pep508-extensions")]
+        if let Some(working_dir) = working_dir {
+            return Ok(VerbatimUrl::from_path(url, working_dir).with_given(url.to_string()));
+        }
+
+        Ok(VerbatimUrl::from_absolute_path(url)
+            .map_err(|err| Pep508Error {
                 message: Pep508ErrorSource::UrlError(err),
                 start,
                 len,
                 input: cursor.to_string(),
             })?
-        }
-    } else {
-        // Ex) `../editable/`
-        if let Some(working_dir) = working_dir {
-            VerbatimUrl::from_path(url, working_dir).with_given(url.to_string())
-        } else {
-            VerbatimUrl::from_absolute_path(url)
-                .map_err(|err| Pep508Error {
-                    message: Pep508ErrorSource::UrlError(err),
-                    start,
-                    len,
-                    input: cursor.to_string(),
-                })?
-                .with_given(url.to_string())
-        }
-    };
-    Ok(url)
+            .with_given(url.to_string()))
+    }
 }
 
 /// PEP 440 wrapper
@@ -910,12 +934,16 @@ fn parse(cursor: &mut Cursor, working_dir: Option<&Path>) -> Result<Requirement,
 
     // ( url_req | name_req )?
     let requirement_kind = match cursor.peek_char() {
+        // url_req
         Some('@') => {
             cursor.next();
             Some(VersionOrUrl::Url(parse_url(cursor, working_dir)?))
         }
+        // name_req
         Some('(') => parse_version_specifier_parentheses(cursor)?,
+        // name_req
         Some('<' | '=' | '>' | '~' | '!') => parse_version_specifier(cursor)?,
+        // No requirements / any version
         Some(';') | None => None,
         Some(other) => {
             // Rewind to the start of the version specifier, to see if the user added a URL without
@@ -942,6 +970,8 @@ fn parse(cursor: &mut Cursor, working_dir: Option<&Path>) -> Result<Requirement,
         }
     };
 
+    let requirement_end = cursor.pos;
+
     // wsp*
     cursor.eat_whitespace();
     // quoted_marker?
@@ -955,12 +985,27 @@ fn parse(cursor: &mut Cursor, working_dir: Option<&Path>) -> Result<Requirement,
     // wsp*
     cursor.eat_whitespace();
     if let Some((pos, char)) = cursor.next() {
+        if let Some(VersionOrUrl::Url(url)) = requirement_kind {
+            if let Some(given) = url.given() {
+                if given.ends_with(';') && marker.is_none() {
+                    return Err(Pep508Error {
+                        message: Pep508ErrorSource::String(
+                            "Missing space before ';', the end of the URL is ambiguous".to_string(),
+                        ),
+                        start: requirement_end - ';'.len_utf8(),
+                        len: ';'.len_utf8(),
+                        input: cursor.to_string(),
+                    });
+                }
+            }
+        }
+        let message = if marker.is_none() {
+            format!(r#"Expected end of input or ';', found '{char}'"#)
+        } else {
+            format!(r#"Expected end of input, found '{char}'"#)
+        };
         return Err(Pep508Error {
-            message: Pep508ErrorSource::String(if marker.is_none() {
-                format!(r#"Expected end of input or ';', found '{char}'"#)
-            } else {
-                format!(r#"Expected end of input, found '{char}'"#)
-            }),
+            message: Pep508ErrorSource::String(message),
             start: pos,
             len: char.len_utf8(),
             input: cursor.to_string(),
@@ -1003,6 +1048,7 @@ pub fn python_module(py: Python<'_>, m: &PyModule) -> PyResult<()> {
 /// Half of these tests are copied from <https://github.com/pypa/packaging/pull/624>
 #[cfg(test)]
 mod tests {
+    use std::env;
     use std::str::FromStr;
 
     use indoc::indoc;
@@ -1449,9 +1495,9 @@ mod tests {
         assert_err(
             r#"name @ https://example.com/; extra == 'example'"#,
             indoc! {"
-                Expected end of input or ';', found 'e'
+                Missing space before ';', the end of the URL is ambiguous
                 name @ https://example.com/; extra == 'example'
-                                             ^"
+                                           ^"
             },
         );
     }
@@ -1586,5 +1632,27 @@ mod tests {
                      ^^^^^^^^"
             },
         );
+    }
+
+    /// Check that the relative path support feature toggle works.
+    #[test]
+    fn non_pep508_paths() {
+        let requirements = &[
+            "foo @ file://./foo",
+            "foo @ file://foo-3.0.0-py3-none-any.whl",
+            "foo @ file:foo-3.0.0-py3-none-any.whl",
+            "foo @ ./foo-3.0.0-py3-none-any.whl",
+        ];
+        let cwd = env::current_dir().unwrap();
+
+        for requirement in requirements {
+            assert_eq!(
+                Requirement::parse(requirement, &cwd).is_ok(),
+                cfg!(feature = "non-pep508-extensions"),
+                "{}: {:?}",
+                requirement,
+                Requirement::parse(requirement, &cwd)
+            );
+        }
     }
 }

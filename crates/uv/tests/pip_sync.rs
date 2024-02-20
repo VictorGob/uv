@@ -904,10 +904,10 @@ fn warn_on_yanked_version() -> Result<()> {
 
     ----- stderr -----
     Resolved 1 package in [TIME]
-    warning: colorama==0.4.2 is yanked (reason: "Bad build, missing files, will not install"). Refresh your lockfile to pin an un-yanked version.
     Downloaded 1 package in [TIME]
     Installed 1 package in [TIME]
      + colorama==0.4.2
+    warning: colorama==0.4.2 is yanked (reason: "Bad build, missing files, will not install"). Refresh your lockfile to pin an un-yanked version.
     "###
     );
 
@@ -2247,7 +2247,7 @@ fn sync_editable() -> Result<()> {
         "../../scripts/editable-installs/maturin_editable/python/maturin_editable/__init__.py";
     let python_version_1 = indoc::indoc! {r"
         from .maturin_editable import *
-        
+
         version = 1
    "};
     fs_err::write(python_source_file, python_version_1)?;
@@ -2263,7 +2263,7 @@ fn sync_editable() -> Result<()> {
     // Edit the sources.
     let python_version_2 = indoc::indoc! {r"
         from .maturin_editable import *
-        
+
         version = 2
    "};
     fs_err::write(python_source_file, python_version_2)?;
@@ -2661,6 +2661,99 @@ fn offline() -> Result<()> {
      + black==23.10.1
     "###
     );
+
+    Ok(())
+}
+
+/// Sync with a repeated `anyio` requirement. The second requirement should be ignored.
+#[test]
+fn repeat_requirement() -> Result<()> {
+    let context = TestContext::new("3.12");
+    let requirements_in = context.temp_dir.child("requirements.in");
+    requirements_in.write_str("anyio\nanyio")?;
+
+    uv_snapshot!(command(&context)
+        .arg("requirements.in"), @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Downloaded 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + anyio==4.3.0
+    "###);
+
+    Ok(())
+}
+
+/// Sync with a repeated, but conflicting `anyio` requirement. The second requirement should cause
+/// an error.
+#[test]
+fn conflicting_requirement() -> Result<()> {
+    let context = TestContext::new("3.12");
+    let requirements_in = context.temp_dir.child("requirements.in");
+    requirements_in.write_str("anyio\nanyio==4.0.0")?;
+
+    uv_snapshot!(command(&context)
+        .arg("requirements.in"), @r###"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    error: Failed to determine installation plan
+      Caused by: Detected duplicate package in requirements: anyio
+    "###);
+
+    Ok(())
+}
+
+/// Don't preserve the mtime from .tar.gz files, it may be the unix epoch (1970-01-01), while Python's zip
+/// implementation can't handle files with an mtime older than 1980.
+/// See also <https://github.com/alexcrichton/tar-rs/issues/349>.
+#[test]
+fn tar_dont_preserve_mtime() -> Result<()> {
+    let context = TestContext::new("3.12");
+    let requirements_txt = context.temp_dir.child("requirements.txt");
+    requirements_txt.write_str("tomli @ https://files.pythonhosted.org/packages/c0/3f/d7af728f075fb08564c5949a9c95e44352e23dee646869fa104a3b2060a3/tomli-2.0.1.tar.gz")?;
+
+    uv_snapshot!(command(&context)
+        .arg("requirements.txt"), @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Downloaded 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + tomli==2.0.1 (from https://files.pythonhosted.org/packages/c0/3f/d7af728f075fb08564c5949a9c95e44352e23dee646869fa104a3b2060a3/tomli-2.0.1.tar.gz)
+    "###);
+
+    Ok(())
+}
+
+/// Avoid creating a file with 000 permissions
+#[test]
+fn set_read_permissions() -> Result<()> {
+    let context = TestContext::new("3.12");
+    let requirements_in = context.temp_dir.child("requirements.in");
+    requirements_in.write_str("databricks==0.2")?;
+
+    uv_snapshot!(command(&context)
+        .arg("requirements.in"), @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Downloaded 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + databricks==0.2
+    "###);
 
     Ok(())
 }

@@ -235,11 +235,24 @@ impl Cache {
         cachedir::ensure_tag(&root)?;
 
         // Add the .gitignore.
-        let gitignore_path = root.join(".gitignore");
-        if !gitignore_path.exists() {
-            let mut file = fs::File::create(gitignore_path)?;
-            file.write_all(b"*")?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(root.join(".gitignore"))
+        {
+            Ok(mut file) => file.write_all(b"*")?,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => (),
+            Err(err) => return Err(err),
         }
+
+        // Add a phony .git, if it doesn't exist, to ensure that the cache isn't considered to be
+        // part of a Git repository. (Some packages will include Git metadata (like a hash) in the
+        // built version if they're in a Git repository, but the cache should be viewed as an
+        // isolated store.)
+        fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(root.join(".git"))?;
 
         fs::canonicalize(root)
     }
@@ -508,7 +521,7 @@ impl CacheBucket {
             CacheBucket::FlatIndex => "flat-index-v0",
             CacheBucket::Git => "git-v0",
             CacheBucket::Interpreter => "interpreter-v0",
-            CacheBucket::Simple => "simple-v0",
+            CacheBucket::Simple => "simple-v1",
             CacheBucket::Wheels => "wheels-v0",
             CacheBucket::Archive => "archive-v0",
         }

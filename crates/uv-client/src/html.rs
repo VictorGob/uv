@@ -5,6 +5,7 @@ use tracing::instrument;
 use url::Url;
 
 use pep440_rs::VersionSpecifiers;
+use pypi_types::LenientVersionSpecifiers;
 use pypi_types::{BaseUrl, DistInfoMetadata, File, Hashes, Yanked};
 
 /// A parsed structure from PyPI "HTML" index format for a single package.
@@ -85,16 +86,25 @@ impl SimpleHtml {
             return Err(Error::FragmentParse(fragment.to_string()));
         }
 
-        // TODO(charlie): Support all hash algorithms.
-        if name != "sha256" {
-            return Err(Error::UnsupportedHashAlgorithm(fragment.to_string()));
+        match name {
+            "md5" => {
+                let md5 = std::str::from_utf8(value.as_bytes())?;
+                let md5 = md5.to_string();
+                Ok(Hashes {
+                    md5: Some(md5),
+                    sha256: None,
+                })
+            }
+            "sha256" => {
+                let sha256 = std::str::from_utf8(value.as_bytes())?;
+                let sha256 = sha256.to_string();
+                Ok(Hashes {
+                    md5: None,
+                    sha256: Some(sha256),
+                })
+            }
+            _ => Err(Error::UnsupportedHashAlgorithm(fragment.to_string())),
         }
-
-        let sha256 = std::str::from_utf8(value.as_bytes())?;
-        let sha256 = sha256.to_string();
-        Ok(Hashes {
-            sha256: Some(sha256),
-        })
     }
 
     /// Parse a [`File`] from an `<a>` tag.
@@ -120,7 +130,7 @@ impl SimpleHtml {
                 },
             )
         } else {
-            (href, Hashes::default())
+            (decoded.as_ref(), Hashes::default())
         };
 
         // Extract the filename from the body text, which MUST match that of
@@ -130,6 +140,10 @@ impl SimpleHtml {
             .last()
             .ok_or_else(|| Error::MissingFilename(href.to_string()))?;
 
+        // Unquote the filename.
+        let filename = urlencoding::decode(filename)
+            .map_err(|_| Error::UnsupportedFilename(filename.to_string()))?;
+
         // Extract the `requires-python` field, which should be set on the
         // `data-requires-python` attribute.
         let requires_python = if let Some(requires_python) =
@@ -137,7 +151,7 @@ impl SimpleHtml {
         {
             let requires_python = std::str::from_utf8(requires_python.as_bytes())?;
             let requires_python = html_escape::decode_html_entities(requires_python);
-            Some(VersionSpecifiers::from_str(&requires_python))
+            Some(LenientVersionSpecifiers::from_str(&requires_python).map(VersionSpecifiers::from))
         } else {
             None
         };
@@ -198,6 +212,9 @@ pub enum Error {
     #[error("Expected distribution filename as last path component of URL: {0}")]
     MissingFilename(String),
 
+    #[error("Expected distribution filename to be UTF-8: {0}")]
+    UnsupportedFilename(String),
+
     #[error("Missing hash attribute on URL: {0}")]
     MissingHash(String),
 
@@ -216,7 +233,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_file() {
+    fn parse_sha256() {
         let text = r#"
 <!DOCTYPE html>
 <html>
@@ -253,6 +270,7 @@ mod tests {
                     dist_info_metadata: None,
                     filename: "Jinja2-3.1.2-py3-none-any.whl",
                     hashes: Hashes {
+                        md5: None,
                         sha256: Some(
                             "6088930bfe239f0e6710546ab9c19c9ef35e29792895fed6e6e31a023a182a61",
                         ),
@@ -261,6 +279,60 @@ mod tests {
                     size: None,
                     upload_time: None,
                     url: "/whl/Jinja2-3.1.2-py3-none-any.whl#sha256=6088930bfe239f0e6710546ab9c19c9ef35e29792895fed6e6e31a023a182a61",
+                    yanked: None,
+                },
+            ],
+        }
+        "###);
+    }
+
+    #[test]
+    fn parse_md5() {
+        let text = r#"
+<!DOCTYPE html>
+<html>
+  <body>
+    <h1>Links for jinja2</h1>
+    <a href="/whl/Jinja2-3.1.2-py3-none-any.whl#md5=6088930bfe239f0e6710546ab9c19c9ef35e29792895fed6e6e31a023a182a61">Jinja2-3.1.2-py3-none-any.whl</a><br/>
+  </body>
+</html>
+<!--TIMESTAMP 1703347410-->
+        "#;
+        let base = Url::parse("https://download.pytorch.org/whl/jinja2/").unwrap();
+        let result = SimpleHtml::parse(text, &base).unwrap();
+        insta::assert_debug_snapshot!(result, @r###"
+        SimpleHtml {
+            base: BaseUrl(
+                Url {
+                    scheme: "https",
+                    cannot_be_a_base: false,
+                    username: "",
+                    password: None,
+                    host: Some(
+                        Domain(
+                            "download.pytorch.org",
+                        ),
+                    ),
+                    port: None,
+                    path: "/whl/jinja2/",
+                    query: None,
+                    fragment: None,
+                },
+            ),
+            files: [
+                File {
+                    dist_info_metadata: None,
+                    filename: "Jinja2-3.1.2-py3-none-any.whl",
+                    hashes: Hashes {
+                        md5: Some(
+                            "6088930bfe239f0e6710546ab9c19c9ef35e29792895fed6e6e31a023a182a61",
+                        ),
+                        sha256: None,
+                    },
+                    requires_python: None,
+                    size: None,
+                    upload_time: None,
+                    url: "/whl/Jinja2-3.1.2-py3-none-any.whl#md5=6088930bfe239f0e6710546ab9c19c9ef35e29792895fed6e6e31a023a182a61",
                     yanked: None,
                 },
             ],
@@ -309,6 +381,7 @@ mod tests {
                     dist_info_metadata: None,
                     filename: "Jinja2-3.1.2-py3-none-any.whl",
                     hashes: Hashes {
+                        md5: None,
                         sha256: Some(
                             "6088930bfe239f0e6710546ab9c19c9ef35e29792895fed6e6e31a023a182a61",
                         ),
@@ -362,6 +435,7 @@ mod tests {
                     dist_info_metadata: None,
                     filename: "Jinja2-3.1.2+233fca715f49-py3-none-any.whl",
                     hashes: Hashes {
+                        md5: None,
                         sha256: Some(
                             "6088930bfe239f0e6710546ab9c19c9ef35e29792895fed6e6e31a023a182a61",
                         ),
@@ -370,6 +444,58 @@ mod tests {
                     size: None,
                     upload_time: None,
                     url: "/whl/Jinja2-3.1.2&#43;233fca715f49-py3-none-any.whl#sha256=6088930bfe239f0e6710546ab9c19c9ef35e29792895fed6e6e31a023a182a61",
+                    yanked: None,
+                },
+            ],
+        }
+        "###);
+    }
+
+    #[test]
+    fn parse_quoted_filepath() {
+        let text = r#"
+<!DOCTYPE html>
+<html>
+  <body>
+    <h1>Links for jinja2</h1>
+    <a href="cpu/torchtext-0.17.0%2Bcpu-cp39-cp39-win_amd64.whl">cpu/torchtext-0.17.0%2Bcpu-cp39-cp39-win_amd64.whl</a><br/>
+  </body>
+</html>
+<!--TIMESTAMP 1703347410-->
+        "#;
+        let base = Url::parse("https://download.pytorch.org/whl/jinja2/").unwrap();
+        let result = SimpleHtml::parse(text, &base).unwrap();
+        insta::assert_debug_snapshot!(result, @r###"
+        SimpleHtml {
+            base: BaseUrl(
+                Url {
+                    scheme: "https",
+                    cannot_be_a_base: false,
+                    username: "",
+                    password: None,
+                    host: Some(
+                        Domain(
+                            "download.pytorch.org",
+                        ),
+                    ),
+                    port: None,
+                    path: "/whl/jinja2/",
+                    query: None,
+                    fragment: None,
+                },
+            ),
+            files: [
+                File {
+                    dist_info_metadata: None,
+                    filename: "torchtext-0.17.0+cpu-cp39-cp39-win_amd64.whl",
+                    hashes: Hashes {
+                        md5: None,
+                        sha256: None,
+                    },
+                    requires_python: None,
+                    size: None,
+                    upload_time: None,
+                    url: "cpu/torchtext-0.17.0%2Bcpu-cp39-cp39-win_amd64.whl",
                     yanked: None,
                 },
             ],
@@ -415,6 +541,7 @@ mod tests {
                     dist_info_metadata: None,
                     filename: "Jinja2-3.1.2-py3-none-any.whl",
                     hashes: Hashes {
+                        md5: None,
                         sha256: None,
                     },
                     requires_python: None,
@@ -500,6 +627,7 @@ mod tests {
                     dist_info_metadata: None,
                     filename: "Jinja2-3.1.2-py3-none-any.whl",
                     hashes: Hashes {
+                        md5: None,
                         sha256: None,
                     },
                     requires_python: None,
@@ -557,7 +685,7 @@ mod tests {
                 <a href="https://storage.googleapis.com/jax-releases/cuda100/jaxlib-0.1.52+cuda100-cp36-none-manylinux2010_x86_64.whl">cuda100/jaxlib-0.1.52+cuda100-cp36-none-manylinux2010_x86_64.whl</a><br>
                 <a href="https://storage.googleapis.com/jax-releases/cuda100/jaxlib-0.1.52+cuda100-cp37-none-manylinux2010_x86_64.whl">cuda100/jaxlib-0.1.52+cuda100-cp37-none-manylinux2010_x86_64.whl</a><br>
             </body>
-            </hmtl>
+            </html>
         "#;
         let base = Url::parse("https://storage.googleapis.com/jax-releases/jax_cuda_releases.html")
             .unwrap();
@@ -586,6 +714,7 @@ mod tests {
                     dist_info_metadata: None,
                     filename: "jaxlib-0.1.52+cuda100-cp36-none-manylinux2010_x86_64.whl",
                     hashes: Hashes {
+                        md5: None,
                         sha256: None,
                     },
                     requires_python: None,
@@ -598,6 +727,7 @@ mod tests {
                     dist_info_metadata: None,
                     filename: "jaxlib-0.1.52+cuda100-cp37-none-manylinux2010_x86_64.whl",
                     hashes: Hashes {
+                        md5: None,
                         sha256: None,
                     },
                     requires_python: None,
@@ -659,6 +789,7 @@ mod tests {
                     dist_info_metadata: None,
                     filename: "Flask-0.1.tar.gz",
                     hashes: Hashes {
+                        md5: None,
                         sha256: Some(
                             "9da884457e910bf0847d396cb4b778ad9f3c3d17db1c5997cb861937bd284237",
                         ),
@@ -673,6 +804,7 @@ mod tests {
                     dist_info_metadata: None,
                     filename: "Flask-0.10.1.tar.gz",
                     hashes: Hashes {
+                        md5: None,
                         sha256: Some(
                             "4c83829ff83d408b5e1d4995472265411d2c414112298f2eb4b359d9e4563373",
                         ),
@@ -687,6 +819,7 @@ mod tests {
                     dist_info_metadata: None,
                     filename: "flask-3.0.1.tar.gz",
                     hashes: Hashes {
+                        md5: None,
                         sha256: Some(
                             "6489f51bb3666def6f314e15f19d50a1869a19ae0e8c9a3641ffe66c77d42403",
                         ),
@@ -706,6 +839,70 @@ mod tests {
                     size: None,
                     upload_time: None,
                     url: "3.0.1/flask-3.0.1.tar.gz#sha256=6489f51bb3666def6f314e15f19d50a1869a19ae0e8c9a3641ffe66c77d42403",
+                    yanked: None,
+                },
+            ],
+        }
+        "###);
+    }
+
+    #[test]
+    fn parse_file_requires_python_trailing_comma() {
+        let text = r#"
+<!DOCTYPE html>
+<html>
+  <body>
+    <h1>Links for jinja2</h1>
+    <a href="/whl/Jinja2-3.1.2-py3-none-any.whl#sha256=6088930bfe239f0e6710546ab9c19c9ef35e29792895fed6e6e31a023a182a61" data-requires-python="&gt;=3.8,">Jinja2-3.1.2-py3-none-any.whl</a><br/>
+  </body>
+</html>
+        "#;
+        let base = Url::parse("https://download.pytorch.org/whl/jinja2/").unwrap();
+        let result = SimpleHtml::parse(text, &base).unwrap();
+        insta::assert_debug_snapshot!(result, @r###"
+        SimpleHtml {
+            base: BaseUrl(
+                Url {
+                    scheme: "https",
+                    cannot_be_a_base: false,
+                    username: "",
+                    password: None,
+                    host: Some(
+                        Domain(
+                            "download.pytorch.org",
+                        ),
+                    ),
+                    port: None,
+                    path: "/whl/jinja2/",
+                    query: None,
+                    fragment: None,
+                },
+            ),
+            files: [
+                File {
+                    dist_info_metadata: None,
+                    filename: "Jinja2-3.1.2-py3-none-any.whl",
+                    hashes: Hashes {
+                        md5: None,
+                        sha256: Some(
+                            "6088930bfe239f0e6710546ab9c19c9ef35e29792895fed6e6e31a023a182a61",
+                        ),
+                    },
+                    requires_python: Some(
+                        Ok(
+                            VersionSpecifiers(
+                                [
+                                    VersionSpecifier {
+                                        operator: GreaterThanEqual,
+                                        version: "3.8",
+                                    },
+                                ],
+                            ),
+                        ),
+                    ),
+                    size: None,
+                    upload_time: None,
+                    url: "/whl/Jinja2-3.1.2-py3-none-any.whl#sha256=6088930bfe239f0e6710546ab9c19c9ef35e29792895fed6e6e31a023a182a61",
                     yanked: None,
                 },
             ],
