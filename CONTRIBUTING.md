@@ -59,6 +59,7 @@ Source distributions can run arbitrary code on build and can make unwanted modif
 ```bash
 docker buildx build -t uv-builder -f Dockerfile --load .
 # Build for musl to avoid glibc errors, might not be required with your OS version
+# Run 'rustup target add x86_64-unknown-linux-musl' if not already installed
 cargo build --target x86_64-unknown-linux-musl --profile profiling --features vendored-openssl
 docker run --rm -it -v $(pwd):/app uv-builder /app/target/x86_64-unknown-linux-musl/profiling/uv-dev resolve-many --cache-dir /app/cache-docker /app/scripts/popular_packages/pypi_10k_most_dependents.txt
 ```
