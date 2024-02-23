@@ -1,11 +1,6 @@
 // The `unreachable_pub` is to silence false positives in RustRover.
 #![allow(dead_code, unreachable_pub)]
 
-use std::borrow::BorrowMut;
-use std::env;
-use std::path::{Path, PathBuf};
-use std::process::Output;
-
 use assert_cmd::assert::{Assert, OutputAssertExt};
 use assert_cmd::Command;
 use assert_fs::assert::PathAssert;
@@ -14,10 +9,16 @@ use assert_fs::fixture::PathChild;
 use fs_err::os::unix::fs::symlink as symlink_file;
 #[cfg(windows)]
 use fs_err::os::windows::fs::symlink_file;
-use platform_host::Platform;
-use regex::Regex;
-use uv_cache::Cache;
+use regex::{self, Regex};
+use std::borrow::BorrowMut;
+use std::env;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::process::Output;
+use uv_fs::Normalized;
 
+use platform_host::Platform;
+use uv_cache::Cache;
 use uv_interpreter::find_requested_python;
 
 // Exclude any packages uploaded after this date.
@@ -44,17 +45,39 @@ pub struct TestContext {
     pub temp_dir: assert_fs::TempDir,
     pub cache_dir: assert_fs::TempDir,
     pub venv: PathBuf,
+
+    // Standard filters for this test context
+    filters: Vec<(String, String)>,
 }
 
 impl TestContext {
     pub fn new(python_version: &str) -> Self {
         let temp_dir = assert_fs::TempDir::new().expect("Failed to create temp dir");
-        let cache_dir = assert_fs::TempDir::new().expect("Failed to create temp dir");
+        let cache_dir = assert_fs::TempDir::new().expect("Failed to create cache dir");
         let venv = create_venv(&temp_dir, &cache_dir, python_version);
+
+        let mut filters = Vec::new();
+        filters.extend(
+            Self::path_patterns(&cache_dir)
+                .into_iter()
+                .map(|pattern| (pattern, "[CACHE_DIR]/".to_string())),
+        );
+        filters.extend(
+            Self::path_patterns(&temp_dir)
+                .into_iter()
+                .map(|pattern| (pattern, "[TEMP_DIR]/".to_string())),
+        );
+        filters.extend(
+            Self::path_patterns(&venv)
+                .into_iter()
+                .map(|pattern| (pattern, "[VENV]/".to_string())),
+        );
+
         Self {
             temp_dir,
             cache_dir,
             venv,
+            filters,
         }
     }
 
@@ -87,6 +110,55 @@ impl TestContext {
             .current_dir(&self.temp_dir)
             .assert()
     }
+
+    /// Assert a package is installed with the given version.
+    pub fn assert_installed(&self, package: &'static str, version: &'static str) {
+        self.assert_command(
+            format!("import {package} as package; print(package.__version__, end='')").as_str(),
+        )
+        .success()
+        .stdout(version);
+    }
+
+    /// Generate an escaped regex pattern for the given path.
+    fn path_patterns(path: impl AsRef<Path>) -> Vec<String> {
+        vec![
+            format!(
+                // Trim the trailing separator for cross-platform directories filters
+                r"{}\\?/?",
+                regex::escape(
+                    &path
+                        .as_ref()
+                        .canonicalize()
+                        .expect("Failed to create canonical path")
+                        // Normalize the path to match display and remove UNC prefixes on Windows
+                        .normalized()
+                        .display()
+                        .to_string(),
+                )
+                // Make seprators platform agnostic because on Windows we will display
+                // paths with Unix-style separators sometimes
+                .replace(r"\\", r"(\\|\/)")
+            ),
+            // Include a non-canonicalized version
+            format!(
+                r"{}\\?/?",
+                regex::escape(&path.as_ref().normalized().display().to_string())
+                    .replace(r"\\", r"(\\|\/)")
+            ),
+        ]
+    }
+
+    /// Standard snapshot filters _plus_ those for this test context.
+    pub fn filters(&self) -> Vec<(&str, &str)> {
+        // Put test context snapshots before the default filters
+        // This ensures we don't replace other patterns inside paths from the test context first
+        self.filters
+            .iter()
+            .map(|(p, r)| (p.as_str(), r.as_str()))
+            .chain(INSTA_FILTERS.iter().copied())
+            .collect()
+    }
 }
 
 pub fn venv_to_interpreter(venv: &Path) -> PathBuf {
@@ -108,14 +180,26 @@ pub fn venv_to_interpreter(venv: &Path) -> PathBuf {
 /// Python versions are sorted from newest to oldest.
 pub fn bootstrapped_pythons() -> Option<Vec<PathBuf>> {
     // Current dir is `<project root>/crates/uv`.
-    let bootstrapped_pythons = std::env::current_dir()
+    let project_root = std::env::current_dir()
         .unwrap()
         .parent()
         .unwrap()
         .parent()
         .unwrap()
-        .join("bin")
-        .join("versions");
+        .to_path_buf();
+    let boostrap_dir = if let Some(boostrap_dir) = env::var_os("UV_BOOTSTRAP_DIR") {
+        let boostrap_dir = PathBuf::from(boostrap_dir);
+        if boostrap_dir.is_absolute() {
+            boostrap_dir
+        } else {
+            // cargo test changes directory to the test crate, but doesn't tell us from where the user is running the
+            // tests. We'll assume that it's the project root.
+            project_root.join(boostrap_dir)
+        }
+    } else {
+        project_root.join("bin")
+    };
+    let bootstrapped_pythons = boostrap_dir.join("versions");
     let Ok(bootstrapped_pythons) = fs_err::read_dir(bootstrapped_pythons) else {
         return None;
     };
@@ -188,7 +272,7 @@ pub fn get_bin() -> PathBuf {
 pub fn create_bin_with_executables(
     temp_dir: &assert_fs::TempDir,
     python_versions: &[&str],
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<OsString> {
     if let Some(bootstrapped_pythons) = bootstrapped_pythons() {
         let selected_pythons = bootstrapped_pythons.into_iter().filter(|path| {
             python_versions.iter().any(|python_version| {
@@ -198,7 +282,7 @@ pub fn create_bin_with_executables(
                     .contains(&format!("@{python_version}"))
             })
         });
-        return Ok(env::join_paths(selected_pythons)?.into());
+        return Ok(env::join_paths(selected_pythons)?);
     }
 
     let bin = temp_dir.child("bin");
@@ -216,7 +300,7 @@ pub fn create_bin_with_executables(
             .expect("Discovered executable must have a filename");
         symlink_file(interpreter.sys_executable(), bin.child(name))?;
     }
-    Ok(bin.canonicalize()?)
+    Ok(bin.canonicalize()?.into())
 }
 
 /// Execute the command and format its output status, stdout and stderr into a snapshot string.
@@ -235,7 +319,7 @@ pub fn run_and_format<'a>(
     let output = command
         .borrow_mut()
         .output()
-        .unwrap_or_else(|_| panic!("Failed to spawn {program}"));
+        .unwrap_or_else(|err| panic!("Failed to spawn {program}: {err}"));
 
     let mut snapshot = format!(
         "success: {:?}\nexit_code: {}\n----- stdout -----\n{}\n----- stderr -----\n{}",
@@ -257,7 +341,9 @@ pub fn run_and_format<'a>(
         // The optional leading +/- is for install logs, the optional next line is for lock files
         let windows_only_deps = [
             ("( [+-] )?colorama==\\d+(\\.[\\d+])+\n(    # via .*\n)?"),
+            ("( [+-] )?colorama==\\d+(\\.[\\d+])+\\s+(# via .*\n)?"),
             ("( [+-] )?tzdata==\\d+(\\.[\\d+])+\n(    # via .*\n)?"),
+            ("( [+-] )?tzdata==\\d+(\\.[\\d+])+\\s+(# via .*\n)?"),
         ];
         let mut removed_packages = 0;
         for windows_only_dep in windows_only_deps {

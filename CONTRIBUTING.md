@@ -52,6 +52,8 @@ Alternatively, you can install `zstandard` from PyPI, then run:
 python3.12 scripts/bootstrap/install.py
 ```
 
+You can configure the bootstrapping directory with `UV_BOOTSTRAP_DIR`.
+
 ### Local testing
 
 You can invoke your development version of uv with `cargo run -- <args>`. For example:
@@ -98,3 +100,22 @@ You can enable `trace` level logging using the `RUST_LOG` environment variable, 
 ```shell
 RUST_LOG=trace uv …
 ```
+
+## Releases
+
+Releases can only be performed by Astral team members.
+
+Changelog entries and version bumps are automated. First, run:
+
+```
+./scripts/release/bump.sh
+```
+
+Then, editorialize the `CHANGELOG.md` file to ensure entries are consistently styled.
+
+Then, open a pull request e.g. `Bump version to ...`.
+
+Binary builds will automatically be tested for the release. 
+
+After merging the pull request, run the [release workflow](https://github.com/astral-sh/uv/actions/workflows/release.yml)
+with the version tag. **Do not include a leading `v`**. The release will automatically be created on GitHub after everything else publishes.

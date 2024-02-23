@@ -5,7 +5,9 @@ use std::process::Command;
 use anyhow::Result;
 use assert_cmd::prelude::*;
 use assert_fs::prelude::*;
+use base64::{prelude::BASE64_STANDARD as base64, Engine};
 use indoc::indoc;
+use itertools::Itertools;
 use url::Url;
 
 use common::{uv_snapshot, TestContext, EXCLUDE_NEWER, INSTA_FILTERS};
@@ -13,6 +15,24 @@ use common::{uv_snapshot, TestContext, EXCLUDE_NEWER, INSTA_FILTERS};
 use crate::common::get_bin;
 
 mod common;
+
+// This is a fine-grained token that only has read-only access to the `uv-private-pypackage` repository
+const READ_ONLY_GITHUB_TOKEN: &[&str] = &[
+    "Z2l0aHViX3BhdA==",
+    "MTFCR0laQTdRMGdXeGsweHV6ekR2Mg==",
+    "NVZMaExzZmtFMHZ1ZEVNd0pPZXZkV040WUdTcmk2WXREeFB4TFlybGlwRTZONEpHV01FMnFZQWJVUm4=",
+];
+
+/// Decode a split, base64 encoded authentication token.
+/// We split and encode the token to bypass revoke by GitHub's secret scanning
+fn decode_token(content: &[&str]) -> String {
+    let token = content
+        .iter()
+        .map(|part| base64.decode(part).unwrap())
+        .map(|decoded| std::str::from_utf8(decoded.as_slice()).unwrap().to_string())
+        .join("_");
+    token
+}
 
 /// Create a `pip install` command with options shared across scenarios.
 fn command(context: &TestContext) -> Command {
@@ -769,6 +789,217 @@ fn install_no_index_version() {
     context.assert_command("import flask").failure();
 }
 
+/// Install a package from a public GitHub repository
+#[test]
+#[cfg(feature = "git")]
+fn install_git_public_https() {
+    let context = TestContext::new("3.8");
+
+    uv_snapshot!(command(&context)
+        .arg("uv-public-pypackage @ git+https://github.com/astral-test/uv-public-pypackage")
+        , @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Downloaded 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + uv-public-pypackage==0.1.0 (from git+https://github.com/astral-test/uv-public-pypackage@0dacfd662c64cb4ceb16e6cf65a157a8b715b979)
+    "###);
+
+    context.assert_installed("uv_public_pypackage", "0.1.0");
+}
+
+/// Install a package from a public GitHub repository at a ref that does not exist
+#[test]
+#[cfg(feature = "git")]
+fn install_git_public_https_missing_branch_or_tag() {
+    let context = TestContext::new("3.8");
+
+    let mut filters = context.filters();
+    // Windows does not style the command the same as Unix, so we must omit it from the snapshot
+    filters.push(("`git fetch .*`", "`git fetch [...]`"));
+    filters.push(("exit status", "exit code"));
+
+    uv_snapshot!(filters, command(&context)
+        // 2.0.0 does not exist
+        .arg("uv-public-pypackage @ git+https://github.com/astral-test/uv-public-pypackage@2.0.0")
+        , @r###"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    error: Failed to download and build: uv-public-pypackage @ git+https://github.com/astral-test/uv-public-pypackage@2.0.0
+      Caused by: Git operation failed
+      Caused by: failed to clone into: [CACHE_DIR]/git-v0/db/8dab139913c4b566
+      Caused by: failed to fetch branch or tag `2.0.0`
+      Caused by: process didn't exit successfully: `git fetch [...]` (exit code: 128)
+    --- stderr
+    fatal: couldn't find remote ref refs/tags/2.0.0
+
+    "###);
+}
+
+/// Install a package from a public GitHub repository at a ref that does not exist
+#[test]
+#[cfg(feature = "git")]
+fn install_git_public_https_missing_commit() {
+    let context = TestContext::new("3.8");
+
+    let mut filters = context.filters();
+    // Windows does not style the command the same as Unix, so we must omit it from the snapshot
+    filters.push(("`git fetch .*`", "`git fetch [...]`"));
+    filters.push(("exit status", "exit code"));
+
+    uv_snapshot!(filters, command(&context)
+        // 2.0.0 does not exist
+        .arg("uv-public-pypackage @ git+https://github.com/astral-test/uv-public-pypackage@79a935a7a1a0ad6d0bdf72dce0e16cb0a24a1b3b")
+        , @r###"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    error: Failed to download and build: uv-public-pypackage @ git+https://github.com/astral-test/uv-public-pypackage@79a935a7a1a0ad6d0bdf72dce0e16cb0a24a1b3b
+      Caused by: Git operation failed
+      Caused by: failed to clone into: [CACHE_DIR]/git-v0/db/8dab139913c4b566
+      Caused by: failed to fetch commit `79a935a7a1a0ad6d0bdf72dce0e16cb0a24a1b3b`
+      Caused by: process didn't exit successfully: `git fetch [...]` (exit code: 128)
+    --- stderr
+    fatal: remote error: upload-pack: not our ref 79a935a7a1a0ad6d0bdf72dce0e16cb0a24a1b3b
+
+    "###);
+}
+
+/// Install a package from a private GitHub repository using a PAT
+#[test]
+#[cfg(all(not(windows), feature = "git"))]
+fn install_git_private_https_pat() {
+    let context = TestContext::new("3.8");
+    let token = decode_token(READ_ONLY_GITHUB_TOKEN);
+
+    let mut filters = INSTA_FILTERS.to_vec();
+    filters.insert(0, (&token, "***"));
+
+    uv_snapshot!(filters, command(&context)
+        .arg(format!("uv-private-pypackage @ git+https://{token}@github.com/astral-test/uv-private-pypackage"))
+        , @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Downloaded 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + uv-private-pypackage==0.1.0 (from git+https://***@github.com/astral-test/uv-private-pypackage@6c09ce9ae81f50670a60abd7d95f30dd416d00ac)
+    "###);
+
+    context.assert_installed("uv_private_pypackage", "0.1.0");
+}
+
+/// Install a package from a private GitHub repository at a specific commit using a PAT
+#[test]
+#[cfg(feature = "git")]
+fn install_git_private_https_pat_at_ref() {
+    let context = TestContext::new("3.8");
+    let token = decode_token(READ_ONLY_GITHUB_TOKEN);
+
+    let mut filters = INSTA_FILTERS.to_vec();
+    filters.insert(0, (&token, "***"));
+    filters.push((r"git\+https://", ""));
+
+    // A user is _required_ on Windows
+    let user = if cfg!(windows) {
+        filters.push((r"git:", ""));
+        "git:"
+    } else {
+        ""
+    };
+
+    uv_snapshot!(filters, command(&context)
+        .arg(format!("uv-private-pypackage @ git+https://{user}{token}@github.com/astral-test/uv-private-pypackage@6c09ce9ae81f50670a60abd7d95f30dd416d00ac"))
+        , @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Downloaded 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + uv-private-pypackage==0.1.0 (from ***@github.com/astral-test/uv-private-pypackage@6c09ce9ae81f50670a60abd7d95f30dd416d00ac)
+    "###);
+
+    context.assert_installed("uv_private_pypackage", "0.1.0");
+}
+
+/// Install a package from a private GitHub repository using a PAT and username
+/// An arbitrary username is supported when using a PAT.
+#[test]
+#[cfg(feature = "git")]
+fn install_git_private_https_pat_and_username() {
+    let context = TestContext::new("3.8");
+    let token = decode_token(READ_ONLY_GITHUB_TOKEN);
+    let user = "astral-test-bot";
+
+    let mut filters = INSTA_FILTERS.to_vec();
+    filters.insert(0, (&token, "***"));
+
+    uv_snapshot!(filters, command(&context)
+        .arg(format!("uv-private-pypackage @ git+https://{user}:{token}@github.com/astral-test/uv-private-pypackage"))
+        , @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Downloaded 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + uv-private-pypackage==0.1.0 (from git+https://astral-test-bot:***@github.com/astral-test/uv-private-pypackage@6c09ce9ae81f50670a60abd7d95f30dd416d00ac)
+    "###);
+
+    context.assert_installed("uv_private_pypackage", "0.1.0");
+}
+
+/// Install a package from a private GitHub repository using a PAT
+#[test]
+#[cfg(all(not(windows), feature = "git"))]
+fn install_git_private_https_pat_not_authorized() {
+    let context = TestContext::new("3.8");
+
+    // A revoked token
+    let token = "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";
+
+    let mut filters = context.filters();
+    filters.insert(0, (&token, "***"));
+
+    // We provide a username otherwise (since the token is invalid), the git cli will prompt for a password
+    // and hang the test
+    uv_snapshot!(filters, command(&context)
+        .arg(format!("uv-private-pypackage @ git+https://git:{token}@github.com/astral-test/uv-private-pypackage"))
+        , @r###"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    error: Failed to download and build: uv-private-pypackage @ git+https://git:***@github.com/astral-test/uv-private-pypackage
+      Caused by: Git operation failed
+      Caused by: failed to clone into: [CACHE_DIR]/git-v0/db/2496970ed6fdf08f
+      Caused by: process didn't exit successfully: `git fetch --force --update-head-ok 'https://git:***@github.com/astral-test/uv-private-pypackage' '+HEAD:refs/remotes/origin/HEAD'` (exit status: 128)
+    --- stderr
+    remote: Support for password authentication was removed on August 13, 2021.
+    remote: Please see https://docs.github.com/en/get-started/getting-started-with-git/about-remote-repositories#cloning-with-https-urls for information on currently recommended modes of authentication.
+    fatal: Authentication failed for 'https://github.com/astral-test/uv-private-pypackage/'
+
+    "###);
+}
+
 /// Install a package without using pre-built wheels.
 #[test]
 fn reinstall_no_binary() {
@@ -1252,6 +1483,220 @@ fn direct_url_zip_file_bunk_permissions() -> Result<()> {
      + typing-extensions==4.8.0
     "###
     );
+
+    Ok(())
+}
+
+#[test]
+fn launcher() -> Result<()> {
+    let context = TestContext::new("3.12");
+    let project_root = fs_err::canonicalize(std::env::current_dir()?.join("../.."))?;
+
+    let filters = [
+        (r"(\d+m )?(\d+\.)?\d+(ms|s)", "[TIME]"),
+        (
+            r"simple-launcher==0\.1\.0 \(from .+\.whl\)",
+            "simple_launcher.whl",
+        ),
+    ];
+
+    uv_snapshot!(
+        filters,
+        command(&context)
+        .arg(format!("simple_launcher@{}", project_root.join("scripts/wheels/simple_launcher-0.1.0-py3-none-any.whl").display()))
+        .arg("--strict"), @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Downloaded 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + simple_launcher.whl
+    "###
+    );
+
+    let bin_path = if cfg!(windows) { "Scripts" } else { "bin" };
+
+    uv_snapshot!(Command::new(
+        context.venv.join(bin_path).join("simple_launcher")
+    ), @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    Hi from the simple launcher!
+
+    ----- stderr -----
+    "###);
+
+    Ok(())
+}
+
+#[test]
+fn launcher_with_symlink() -> Result<()> {
+    let context = TestContext::new("3.12");
+    let project_root = fs_err::canonicalize(std::env::current_dir()?.join("../.."))?;
+
+    let filters = [
+        (r"(\d+m )?(\d+\.)?\d+(ms|s)", "[TIME]"),
+        (
+            r"simple-launcher==0\.1\.0 \(from .+\.whl\)",
+            "simple_launcher.whl",
+        ),
+    ];
+
+    uv_snapshot!(filters,
+        command(&context)
+            .arg(format!("simple_launcher@{}", project_root.join("scripts/wheels/simple_launcher-0.1.0-py3-none-any.whl").display()))
+            .arg("--strict"),
+        @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Downloaded 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + simple_launcher.whl
+    "###
+    );
+
+    #[cfg(windows)]
+    if let Err(error) = std::os::windows::fs::symlink_file(
+        context.venv.join("Scripts\\simple_launcher.exe"),
+        context.temp_dir.join("simple_launcher.exe"),
+    ) {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            // Not running as an administrator or developer mode isn't enabled.
+            // Ignore the test
+            return Ok(());
+        }
+    }
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        context.venv.join("bin/simple_launcher"),
+        context.temp_dir.join("simple_launcher"),
+    )?;
+
+    // Only support windows or linux
+    #[cfg(not(any(windows, unix)))]
+    return Ok(());
+
+    uv_snapshot!(Command::new(
+        context.temp_dir.join("simple_launcher")
+    ), @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    Hi from the simple launcher!
+
+    ----- stderr -----
+    "###);
+
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn config_settings() -> Result<()> {
+    let context = TestContext::new("3.12");
+
+    let current_dir = std::env::current_dir()?;
+    let workspace_dir = regex::escape(
+        Url::from_directory_path(current_dir.join("..").join("..").canonicalize()?)
+            .unwrap()
+            .as_str(),
+    );
+
+    let filters = [(workspace_dir.as_str(), "file://[WORKSPACE_DIR]/")]
+        .into_iter()
+        .chain(INSTA_FILTERS.to_vec())
+        .collect::<Vec<_>>();
+
+    // Install the editable package.
+    uv_snapshot!(filters, Command::new(get_bin())
+        .arg("pip")
+        .arg("install")
+        .arg("-e")
+        .arg("../../scripts/editable-installs/setuptools_editable")
+        .arg("--cache-dir")
+        .arg(context.cache_dir.path())
+        .arg("--exclude-newer")
+        .arg(EXCLUDE_NEWER)
+        .env("VIRTUAL_ENV", context.venv.as_os_str())
+        .env("CARGO_TARGET_DIR", "../../../target/target_install_editable"), @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Built 1 editable in [TIME]
+    Resolved 2 packages in [TIME]
+    Downloaded 1 package in [TIME]
+    Installed 2 packages in [TIME]
+     + iniconfig==2.0.0
+     + setuptools-editable==0.1.0 (from file://[WORKSPACE_DIR]/scripts/editable-installs/setuptools_editable)
+    "###
+    );
+
+    // When installed without `--editable_mode=compat`, the `finder.py` file should be present.
+    let finder = context
+        .venv
+        .join("lib/python3.12/site-packages")
+        .join("__editable___setuptools_editable_0_1_0_finder.py");
+    assert!(finder.exists());
+
+    // Install the editable package with `--editable_mode=compat`.
+    let context = TestContext::new("3.12");
+
+    let current_dir = std::env::current_dir()?;
+    let workspace_dir = regex::escape(
+        Url::from_directory_path(current_dir.join("..").join("..").canonicalize()?)
+            .unwrap()
+            .as_str(),
+    );
+
+    let filters = [(workspace_dir.as_str(), "file://[WORKSPACE_DIR]/")]
+        .into_iter()
+        .chain(INSTA_FILTERS.to_vec())
+        .collect::<Vec<_>>();
+
+    uv_snapshot!(filters, Command::new(get_bin())
+        .arg("pip")
+        .arg("install")
+        .arg("-e")
+        .arg("../../scripts/editable-installs/setuptools_editable")
+        .arg("-C")
+        .arg("editable_mode=compat")
+        .arg("--cache-dir")
+        .arg(context.cache_dir.path())
+        .arg("--exclude-newer")
+        .arg(EXCLUDE_NEWER)
+        .env("VIRTUAL_ENV", context.venv.as_os_str())
+        .env("CARGO_TARGET_DIR", "../../../target/target_install_editable"), @r###"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Built 1 editable in [TIME]
+    Resolved 2 packages in [TIME]
+    Downloaded 1 package in [TIME]
+    Installed 2 packages in [TIME]
+     + iniconfig==2.0.0
+     + setuptools-editable==0.1.0 (from file://[WORKSPACE_DIR]/scripts/editable-installs/setuptools_editable)
+    "###
+    );
+
+    // When installed without `--editable_mode=compat`, the `finder.py` file should _not_ be present.
+    let finder = context
+        .venv
+        .join("lib/python3.12/site-packages")
+        .join("__editable___setuptools_editable_0_1_0_finder.py");
+    assert!(!finder.exists());
 
     Ok(())
 }

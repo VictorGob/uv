@@ -9,7 +9,6 @@ use petgraph::Direction;
 use pubgrub::range::Range;
 use pubgrub::solver::{Kind, State};
 use pubgrub::type_aliases::SelectedDependencies;
-
 use rustc_hash::FxHashMap;
 use url::Url;
 
@@ -20,11 +19,23 @@ use pep508_rs::VerbatimUrl;
 use pypi_types::{Hashes, Metadata21};
 use uv_normalize::{ExtraName, PackageName};
 
+use crate::editables::Editables;
 use crate::pins::FilePins;
 use crate::pubgrub::{PubGrubDistribution, PubGrubPackage, PubGrubPriority};
 use crate::resolver::VersionsResponse;
-
 use crate::ResolveError;
+
+/// Indicate the style of annotation comments, used to indicate the dependencies that requested each
+/// package.
+#[derive(Debug, Default, Copy, Clone, PartialEq)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+pub enum AnnotationStyle {
+    /// Render the annotations on a single, comma-separated line.
+    Line,
+    /// Render each annotation on its own line.
+    #[default]
+    Split,
+}
 
 /// A complete resolution graph in which every node represents a pinned package and every edge
 /// represents a dependency between two pinned packages.
@@ -35,7 +46,7 @@ pub struct ResolutionGraph {
     /// The metadata for every distribution in this resolution.
     hashes: FxHashMap<PackageName, Vec<Hashes>>,
     /// The set of editable requirements in this resolution.
-    editables: FxHashMap<PackageName, (LocalEditable, Metadata21)>,
+    editables: Editables,
     /// Any diagnostics that were encountered while building the graph.
     diagnostics: Vec<Diagnostic>,
 }
@@ -49,7 +60,7 @@ impl ResolutionGraph {
         distributions: &OnceMap<PackageId, Metadata21>,
         redirects: &DashMap<Url, Url>,
         state: &State<PubGrubPackage, Range<Version>, PubGrubPriority>,
-        editables: FxHashMap<PackageName, (LocalEditable, Metadata21)>,
+        editables: Editables,
     ) -> Result<Self, ResolveError> {
         // TODO(charlie): petgraph is a really heavy and unnecessary dependency here. We should
         // write our own graph, given that our requirements are so simple.
@@ -90,7 +101,9 @@ impl ResolutionGraph {
                 }
                 PubGrubPackage::Package(package_name, None, Some(url)) => {
                     // Create the distribution.
-                    let pinned_package = {
+                    let pinned_package = if let Some((editable, _)) = editables.get(package_name) {
+                        Dist::from_editable(package_name.clone(), editable.clone())?
+                    } else {
                         let url = redirects.get(url).map_or_else(
                             || url.clone(),
                             |url| VerbatimUrl::unknown(url.value().clone()),
@@ -117,14 +130,10 @@ impl ResolutionGraph {
                     // Validate that the `extra` exists.
                     let dist = PubGrubDistribution::from_registry(package_name, version);
 
-                    if let Some((_, metadata)) = editables.get(package_name) {
+                    if let Some((editable, metadata)) = editables.get(package_name) {
                         if !metadata.provides_extras.contains(extra) {
-                            let pinned_package = pins
-                                .get(package_name, version)
-                                .unwrap_or_else(|| {
-                                    panic!("Every package should be pinned: {package_name:?}")
-                                })
-                                .clone();
+                            let pinned_package =
+                                Dist::from_editable(package_name.clone(), editable.clone())?;
 
                             diagnostics.push(Diagnostic::MissingExtra {
                                 dist: pinned_package,
@@ -157,24 +166,37 @@ impl ResolutionGraph {
                 PubGrubPackage::Package(package_name, Some(extra), Some(url)) => {
                     // Validate that the `extra` exists.
                     let dist = PubGrubDistribution::from_url(package_name, url);
-                    let metadata = distributions.get(&dist.package_id()).unwrap_or_else(|| {
-                        panic!(
-                            "Every package should have metadata: {:?}",
-                            dist.package_id()
-                        )
-                    });
 
-                    if !metadata.provides_extras.contains(extra) {
-                        let url = redirects.get(url).map_or_else(
-                            || url.clone(),
-                            |url| VerbatimUrl::unknown(url.value().clone()),
-                        );
-                        let pinned_package = Dist::from_url(package_name.clone(), url)?;
+                    if let Some((editable, metadata)) = editables.get(package_name) {
+                        if !metadata.provides_extras.contains(extra) {
+                            let pinned_package =
+                                Dist::from_editable(package_name.clone(), editable.clone())?;
 
-                        diagnostics.push(Diagnostic::MissingExtra {
-                            dist: pinned_package,
-                            extra: extra.clone(),
+                            diagnostics.push(Diagnostic::MissingExtra {
+                                dist: pinned_package,
+                                extra: extra.clone(),
+                            });
+                        }
+                    } else {
+                        let metadata = distributions.get(&dist.package_id()).unwrap_or_else(|| {
+                            panic!(
+                                "Every package should have metadata: {:?}",
+                                dist.package_id()
+                            )
                         });
+
+                        if !metadata.provides_extras.contains(extra) {
+                            let url = redirects.get(url).map_or_else(
+                                || url.clone(),
+                                |url| VerbatimUrl::unknown(url.value().clone()),
+                            );
+                            let pinned_package = Dist::from_url(package_name.clone(), url)?;
+
+                            diagnostics.push(Diagnostic::MissingExtra {
+                                dist: pinned_package,
+                                extra: extra.clone(),
+                            });
+                        }
                     }
                 }
                 _ => {}
@@ -256,11 +278,14 @@ pub struct DisplayResolutionGraph<'a> {
     /// Whether to include annotations in the output, to indicate which dependency or dependencies
     /// requested each package.
     include_annotations: bool,
+    /// The style of annotation comments, used to indicate the dependencies that requested each
+    /// package.
+    annotation_style: AnnotationStyle,
 }
 
 impl<'a> From<&'a ResolutionGraph> for DisplayResolutionGraph<'a> {
     fn from(resolution: &'a ResolutionGraph) -> Self {
-        Self::new(resolution, false, true)
+        Self::new(resolution, false, true, AnnotationStyle::default())
     }
 }
 
@@ -270,11 +295,13 @@ impl<'a> DisplayResolutionGraph<'a> {
         underlying: &'a ResolutionGraph,
         show_hashes: bool,
         include_annotations: bool,
+        annotation_style: AnnotationStyle,
     ) -> DisplayResolutionGraph<'a> {
         Self {
             resolution: underlying,
             show_hashes,
             include_annotations,
+            annotation_style,
         }
     }
 }
@@ -339,16 +366,13 @@ impl std::fmt::Display for DisplayResolutionGraph<'_> {
         // Print out the dependency graph.
         for (index, node) in nodes {
             // Display the node itself.
-            match node {
-                Node::Distribution(_, dist) => {
-                    write!(f, "{}", dist.verbatim())?;
-                }
-                Node::Editable(_, editable) => {
-                    write!(f, "-e {}", editable.verbatim())?;
-                }
-            }
+            let mut line = match node {
+                Node::Distribution(_, dist) => format!("{}", dist.verbatim()),
+                Node::Editable(_, editable) => format!("-e {}", editable.verbatim()),
+            };
 
             // Display the distribution hashes, if any.
+            let mut has_hashes = false;
             if self.show_hashes {
                 if let Some(hashes) = self
                     .resolution
@@ -358,13 +382,17 @@ impl std::fmt::Display for DisplayResolutionGraph<'_> {
                 {
                     for hash in hashes {
                         if let Some(hash) = hash.to_string() {
-                            writeln!(f, " \\")?;
-                            write!(f, "    --hash={hash}")?;
+                            has_hashes = true;
+                            line.push_str(" \\\n");
+                            line.push_str("    --hash=");
+                            line.push_str(&hash);
                         }
                     }
                 }
             }
-            writeln!(f)?;
+
+            // Determine the annotation comment and separator (between comment and requirement).
+            let mut annotation = None;
 
             if self.include_annotations {
                 // Display all dependencies.
@@ -376,20 +404,49 @@ impl std::fmt::Display for DisplayResolutionGraph<'_> {
                     .collect::<Vec<_>>();
                 edges.sort_unstable_by_key(|package| package.name());
 
-                match edges.len() {
-                    0 => {}
-                    1 => {
-                        for dependency in edges {
-                            writeln!(f, "{}", format!("    # via {}", dependency.name()).green())?;
+                match self.annotation_style {
+                    AnnotationStyle::Line => {
+                        if !edges.is_empty() {
+                            let separator = if has_hashes { "\n    " } else { "  " };
+                            let deps = edges
+                                .into_iter()
+                                .map(|dependency| dependency.name().to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let comment = format!("# via {deps}").green().to_string();
+                            annotation = Some((separator, comment));
                         }
                     }
-                    _ => {
-                        writeln!(f, "{}", "    # via".green())?;
-                        for dependency in edges {
-                            writeln!(f, "{}", format!("    #   {}", dependency.name()).green())?;
+                    AnnotationStyle::Split => match edges.as_slice() {
+                        [] => {}
+                        [edge] => {
+                            let separator = "\n";
+                            let comment = format!("    # via {}", edge.name()).green().to_string();
+                            annotation = Some((separator, comment));
                         }
-                    }
+                        edges => {
+                            let separator = "\n";
+                            let deps = edges
+                                .iter()
+                                .map(|dependency| format!("    #   {}", dependency.name()))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            let comment = format!("    # via\n{deps}").green().to_string();
+                            annotation = Some((separator, comment));
+                        }
+                    },
                 }
+            }
+
+            if let Some((separator, comment)) = annotation {
+                // Assemble the line with the annotations and remove trailing whitespaces.
+                for line in format!("{line:24}{separator}{comment}").lines() {
+                    let line = line.trim_end();
+                    writeln!(f, "{line}")?;
+                }
+            } else {
+                // Write the line as is.
+                writeln!(f, "{line}")?;
             }
         }
 

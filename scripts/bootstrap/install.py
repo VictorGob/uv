@@ -30,9 +30,11 @@
 
 import hashlib
 import json
+import os
 import platform
 import shutil
 import sys
+import sysconfig
 import tarfile
 import tempfile
 import urllib.parse
@@ -48,7 +50,10 @@ except ImportError:
 # Setup some file paths
 THIS_DIR = Path(__file__).parent
 ROOT_DIR = THIS_DIR.parent.parent
-BIN_DIR = ROOT_DIR / "bin"
+if bin_dir := os.environ.get("UV_BOOTSTRAP_DIR"):
+    BIN_DIR = Path(bin_dir)
+else:
+    BIN_DIR = ROOT_DIR / "bin"
 INSTALL_DIR = BIN_DIR / "versions"
 VERSIONS_FILE = ROOT_DIR / ".python-versions"
 VERSIONS_METADATA_FILE = THIS_DIR / "versions.json"
@@ -98,7 +103,11 @@ if INSTALL_DIR.exists():
 
 # Install each version
 for version in versions:
-    key = f"{INTERPRETER}-{version}-{PLATFORM_MAP.get(PLATFORM, PLATFORM)}-{ARCH_MAP.get(ARCH, ARCH)}"
+    if platform.system() == "Linux":
+        libc = sysconfig.get_config_var("SOABI").split("-")[-1]
+    else:
+        libc = "none"
+    key = f"{INTERPRETER}-{version}-{PLATFORM_MAP.get(PLATFORM, PLATFORM)}-{ARCH_MAP.get(ARCH, ARCH)}-{libc}"
     install_dir = INSTALL_DIR / f"{INTERPRETER}@{version}"
     print(f"Installing {key}")
 

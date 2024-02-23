@@ -33,6 +33,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
+      fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +55,7 @@ jobs:
           - { os: "ubuntu", runner: "ubuntu-latest-large" }
           - { os: "windows", runner: "windows-latest-large" }
           - { os: "macos", runner: "macos-14" }
+      fail-fast: false
     runs-on:
       labels: ${{ matrix.runner }}
     name: "cargo test | ${{ matrix.os }}"
@@ -113,7 +115,7 @@ jobs:
           workspaces: "crates/uv-trampoline"
       - name: "Clippy"
         working-directory: crates/uv-trampoline
-        run: cargo clippy --all-features --locked -- -D warnings
+        run: cargo clippy --all-features --locked --target x86_64-pc-windows-msvc -- -D warnings
       - name: "Build"
         working-directory: crates/uv-trampoline
-        run: cargo build --release -Z build-std=core,panic_abort,alloc -Z build-std-features=compiler-builtins-mem --target x86_64-pc-windows-msvc
+        run: cargo build --release --target x86_64-pc-windows-msvc

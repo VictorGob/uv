@@ -5,23 +5,23 @@ use std::path::Path;
 use std::str::FromStr;
 
 use async_http_range_reader::AsyncHttpRangeReader;
-use async_zip::tokio::read::seek::ZipFileReader;
 use futures::{FutureExt, TryStreamExt};
+
 use reqwest::{Client, ClientBuilder, Response, StatusCode};
 use reqwest_retry::policies::ExponentialBackoff;
 use reqwest_retry::RetryTransientMiddleware;
 use serde::{Deserialize, Serialize};
-use tempfile::tempfile_in;
-use tokio::io::BufWriter;
+use tokio::io::AsyncReadExt;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{debug, info_span, instrument, trace, warn, Instrument};
 use url::Url;
 
 use distribution_filename::{DistFilename, SourceDistFilename, WheelFilename};
 use distribution_types::{BuiltDist, File, FileLocation, IndexUrl, IndexUrls, Name};
-use install_wheel_rs::find_dist_info;
+use install_wheel_rs::{find_dist_info, is_metadata_entry};
 use pep440_rs::Version;
 use pypi_types::{Metadata21, SimpleJson};
+use uv_auth::safe_copy_url_auth;
 use uv_cache::{Cache, CacheBucket, WheelCache};
 use uv_normalize::PackageName;
 use uv_warnings::warn_user_once;
@@ -88,17 +88,17 @@ impl RegistryClientBuilder {
 
     pub fn build(self) -> RegistryClient {
         let client_raw = self.client.unwrap_or_else(|| {
-            // Get pip timeout from env var
+            // Timeout options, matching https://doc.rust-lang.org/nightly/cargo/reference/config.html#httptimeout
+            // `UV_REQUEST_TIMEOUT` is provided for backwards compatibility with v0.1.6
             let default_timeout = 5 * 60;
-            let timeout = env::var("UV_REQUEST_TIMEOUT")
-                .map_err(|_| default_timeout)
-                .and_then(|value| {
-                    value.parse::<u64>()
-                        .map_err(|_| {
-                            warn_user_once!("Ignoring invalid value for UV_REQUEST_TIMEOUT. Expected integer number of seconds, got {value}.");
-                            default_timeout
-                        })
-                }).unwrap_or(default_timeout);
+            let timeout = env::var("UV_HTTP_TIMEOUT").or_else(|_| env::var("UV_REQUEST_TIMEOUT")).or_else(|_| env::var("HTTP_TIMEOUT")).and_then(|value| {
+                value.parse::<u64>()
+                    .or_else(|_| {
+                        // On parse error, warn and  use the default timeout
+                        warn_user_once!("Ignoring invalid value from environment for UV_REQUEST_TIMEOUT. Expected integer number of seconds, got \"{value}\".");
+                        Ok(default_timeout)
+                    })
+            }).unwrap_or(default_timeout);
             debug!("Using registry request timeout of {}s", timeout);
             // Disallow any connections.
             let client_core = ClientBuilder::new()
@@ -247,6 +247,10 @@ impl RegistryClient {
             .map_err(ErrorKind::RequestError)?;
         let parse_simple_response = |response: Response| {
             async {
+                // Use the response URL, rather than the request URL, as the base for relative URLs.
+                // This ensures that we handle redirects and other URL transformations correctly.
+                let url = safe_copy_url_auth(&url, response.url().clone());
+
                 let content_type = response
                     .headers()
                     .get("content-type")
@@ -267,17 +271,16 @@ impl RegistryClient {
                         let bytes = response.bytes().await.map_err(ErrorKind::RequestError)?;
                         let data: SimpleJson = serde_json::from_slice(bytes.as_ref())
                             .map_err(|err| Error::from_json_err(err, url.clone()))?;
-                        let metadata =
-                            SimpleMetadata::from_files(data.files, package_name, url.as_str());
-                        metadata
+
+                        SimpleMetadata::from_files(data.files, package_name, &url)
                     }
                     MediaType::Html => {
                         let text = response.text().await.map_err(ErrorKind::RequestError)?;
                         let SimpleHtml { base, files } = SimpleHtml::parse(&text, &url)
                             .map_err(|err| Error::from_html_err(err, url.clone()))?;
-                        let metadata =
-                            SimpleMetadata::from_files(files, package_name, base.as_url().as_str());
-                        metadata
+                        let base = safe_copy_url_auth(&url, base.into_url());
+
+                        SimpleMetadata::from_files(files, package_name, &base)
                     }
                 };
                 OwnedArchive::from_unarchived(&unarchived)
@@ -323,7 +326,8 @@ impl RegistryClient {
                         .await
                         .map_err(ErrorKind::Io)?;
                     let reader = tokio::io::BufReader::new(file);
-                    read_metadata_async(&wheel.filename, built_dist.to_string(), reader).await?
+                    read_metadata_async_seek(&wheel.filename, built_dist.to_string(), reader)
+                        .await?
                 }
             },
             BuiltDist::DirectUrl(wheel) => {
@@ -339,7 +343,7 @@ impl RegistryClient {
                     .await
                     .map_err(ErrorKind::Io)?;
                 let reader = tokio::io::BufReader::new(file);
-                read_metadata_async(&wheel.filename, built_dist.to_string(), reader).await?
+                read_metadata_async_seek(&wheel.filename, built_dist.to_string(), reader).await?
             }
         };
 
@@ -489,20 +493,9 @@ impl RegistryClient {
             }
         }
 
-        // TODO(konstin): Download the wheel into a cache shared with the installer instead
-        // Note that this branch is only hit when you're not using and the server where
-        // you host your wheels for some reasons doesn't support range requests
-        // (tbh we should probably warn here and tell users to get a better registry because
-        // their current one makes resolution unnecessary slow).
-        let temp_download = tempfile_in(self.cache.root()).map_err(ErrorKind::CacheWrite)?;
-        let mut writer = BufWriter::new(tokio::fs::File::from_std(temp_download));
-        let mut reader = self.stream_external(url).await?.compat();
-        tokio::io::copy(&mut reader, &mut writer)
-            .await
-            .map_err(ErrorKind::CacheWrite)?;
-        let reader = writer.into_inner();
-
-        read_metadata_async(filename, url.to_string(), reader).await
+        // Stream the file, searching for the METADATA.
+        let reader = self.stream_external(url).await?;
+        read_metadata_async_stream(filename, url.to_string(), reader).await
     }
 
     /// Stream a file from an external URL.
@@ -526,13 +519,13 @@ impl RegistryClient {
     }
 }
 
-/// It doesn't really fit into `uv_client`, but it avoids cyclical crate dependencies.
-async fn read_metadata_async(
+/// Read a wheel's `METADATA` file from a zip file.
+async fn read_metadata_async_seek(
     filename: &WheelFilename,
     debug_source: String,
     reader: impl tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
 ) -> Result<Metadata21, Error> {
-    let mut zip_reader = ZipFileReader::with_tokio(reader)
+    let mut zip_reader = async_zip::tokio::read::seek::ZipFileReader::with_tokio(reader)
         .await
         .map_err(|err| ErrorKind::Zip(filename.clone(), err))?;
 
@@ -543,11 +536,11 @@ async fn read_metadata_async(
             .entries()
             .iter()
             .enumerate()
-            .filter_map(|(idx, e)| Some((idx, e.filename().as_str().ok()?))),
+            .filter_map(|(index, entry)| Some((index, entry.filename().as_str().ok()?))),
     )
     .map_err(ErrorKind::InstallWheel)?;
 
-    // Read the contents of the METADATA file
+    // Read the contents of the `METADATA` file.
     let mut contents = Vec::new();
     zip_reader
         .reader_with_entry(metadata_idx)
@@ -561,6 +554,49 @@ async fn read_metadata_async(
         ErrorKind::MetadataParseError(filename.clone(), debug_source, Box::new(err))
     })?;
     Ok(metadata)
+}
+
+/// Like [`read_metadata_async_seek`], but doesn't use seek.
+async fn read_metadata_async_stream<R: futures::AsyncRead + Unpin>(
+    filename: &WheelFilename,
+    debug_source: String,
+    reader: R,
+) -> Result<Metadata21, Error> {
+    let mut zip = async_zip::base::read::stream::ZipFileReader::new(reader);
+
+    while let Some(mut entry) = zip
+        .next_with_entry()
+        .await
+        .map_err(|err| ErrorKind::Zip(filename.clone(), err))?
+    {
+        // Find the `METADATA` entry.
+        let path = entry
+            .reader()
+            .entry()
+            .filename()
+            .as_str()
+            .map_err(|err| ErrorKind::Zip(filename.clone(), err))?;
+
+        if is_metadata_entry(path, filename) {
+            let mut reader = entry.reader_mut().compat();
+            let mut contents = Vec::new();
+            reader.read_to_end(&mut contents).await.unwrap();
+
+            let metadata = Metadata21::parse(&contents).map_err(|err| {
+                ErrorKind::MetadataParseError(filename.clone(), debug_source, Box::new(err))
+            })?;
+            return Ok(metadata);
+        }
+
+        // Close current file to get access to the next one. See docs:
+        // https://docs.rs/async_zip/0.0.16/async_zip/base/read/stream/
+        zip = entry
+            .skip()
+            .await
+            .map_err(|err| ErrorKind::Zip(filename.clone(), err))?;
+    }
+
+    Err(ErrorKind::MetadataNotFound(filename.clone(), debug_source).into())
 }
 
 #[derive(
@@ -633,7 +669,7 @@ impl SimpleMetadata {
         self.0.iter()
     }
 
-    fn from_files(files: Vec<pypi_types::File>, package_name: &PackageName, base: &str) -> Self {
+    fn from_files(files: Vec<pypi_types::File>, package_name: &PackageName, base: &Url) -> Self {
         let mut map: BTreeMap<Version, VersionFiles> = BTreeMap::default();
 
         // Group the distributions by version and kind
@@ -773,11 +809,11 @@ mod tests {
         }
         "#;
         let data: SimpleJson = serde_json::from_str(response).unwrap();
-        let base = "https://pypi.org/simple/pyflyby/";
+        let base = Url::parse("https://pypi.org/simple/pyflyby/").unwrap();
         let simple_metadata = SimpleMetadata::from_files(
             data.files,
             &PackageName::from_str("pyflyby").unwrap(),
-            base,
+            &base,
         );
         let versions: Vec<String> = simple_metadata
             .iter()

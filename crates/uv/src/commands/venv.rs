@@ -6,6 +6,7 @@ use std::vec;
 use anstream::eprint;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use itertools::Itertools;
 use miette::{Diagnostic, IntoDiagnostic};
 use owo_colors::OwoColorize;
 use thiserror::Error;
@@ -21,7 +22,7 @@ use uv_fs::Normalized;
 use uv_installer::NoBinary;
 use uv_interpreter::{find_default_python, find_requested_python, Error};
 use uv_resolver::{InMemoryIndex, OptionsBuilder};
-use uv_traits::{BuildContext, InFlight, NoBuild, SetupPyStrategy};
+use uv_traits::{BuildContext, ConfigSettings, InFlight, NoBuild, SetupPyStrategy};
 
 use crate::commands::ExitStatus;
 use crate::printer::Printer;
@@ -118,8 +119,12 @@ async fn venv_impl(
     )
     .into_diagnostic()?;
 
+    // Extra cfg for pyvenv.cfg to specify uv version
+    let extra_cfg = vec![("uv".to_string(), env!("CARGO_PKG_VERSION").to_string())];
+
     // Create the virtual environment.
-    let venv = gourgeist::create_venv(path, interpreter, prompt).map_err(VenvError::Creation)?;
+    let venv = gourgeist::create_venv(path, interpreter, prompt, extra_cfg)
+        .map_err(VenvError::Creation)?;
 
     // Install seed packages.
     if seed {
@@ -149,6 +154,9 @@ async fn venv_impl(
         // Track in-flight downloads, builds, etc., across resolutions.
         let in_flight = InFlight::default();
 
+        // For seed packages, assume the default settings are sufficient.
+        let config_settings = ConfigSettings::default();
+
         // Prep the build context.
         let build_dispatch = BuildDispatch::new(
             &client,
@@ -160,6 +168,7 @@ async fn venv_impl(
             &in_flight,
             venv.python_executable(),
             SetupPyStrategy::default(),
+            &config_settings,
             &NoBuild::All,
             &NoBinary::None,
         )
@@ -184,7 +193,10 @@ async fn venv_impl(
             .await
             .map_err(VenvError::Seed)?;
 
-        for distribution in resolution.distributions() {
+        for distribution in resolution
+            .distributions()
+            .sorted_unstable_by(|a, b| a.name().cmp(b.name()).then(a.version().cmp(&b.version())))
+        {
             writeln!(
                 printer,
                 " {} {}{}",

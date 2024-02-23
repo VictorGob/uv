@@ -37,8 +37,8 @@ Install uv with our standalone installers, or from [PyPI](https://pypi.org/proje
 # On macOS and Linux.
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# On Windows (with PowerShell).
-irm https://astral.sh/uv/install.ps1 | iex
+# On Windows.
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # With pip.
 pip install uv
@@ -66,7 +66,7 @@ To activate the virtual environment:
 source .venv/bin/activate
 
 # On Windows.
-.\.venv\Scripts\activate.ps1
+.venv\Scripts\activate
 ```
 
 To install a package into the virtual environment:
@@ -76,6 +76,7 @@ uv pip install flask                # Install Flask.
 uv pip install -r requirements.txt  # Install from a requirements.txt file.
 uv pip install -e .                 # Install the current project in editable mode.
 uv pip install "package @ ."        # Install the current project from disk
+uv pip install "flask[dotenv]"      # Install Flask with "dotenv" extra.
 ```
 
 To generate a set of locked dependencies from an input file:
@@ -171,6 +172,28 @@ search for a Python interpreter matching that version in the following order:
 Since uv has no dependency on Python, it can even install into virtual environments other than
 its own. For example, setting `VIRTUAL_ENV=/path/to/venv` will cause uv to install into
 `/path/to/venv`, no matter where uv is installed.
+
+### Git authentication
+
+uv allows packages to be installed from Git and supports the following schemes for authenticating with private
+repositories.
+
+Using SSH:
+
+- `git+ssh://git@<hostname>/...` (e.g. `git+ssh://git@github.com/astral-sh/uv`)
+- `git+ssh://git@<host>/...` (e.g. `git+ssh://git@github.com-key-2/astral-sh/uv`)
+
+See the [GitHub SSH documentation](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/about-ssh) for more details on how to configure SSH.
+
+Using a password or token:
+
+- `git+https://<user>:<token>@<hostname>/...` (e.g. `git+https://git:github_pat_asdf@github.com/astral-sh/uv`)
+- `git+https://<token>@<hostname>/...` (e.g. `git+https://github_pat_asdf@github.com/astral-sh/uv`)
+- `git+https://<user>@<hostname>/...` (e.g. `git+https://git@github.com/astral-sh/uv`)
+
+When using a GitHub personal access token, the username is arbitrary. GitHub does not support logging in with password directly, although other hosts may. If a username is provided without credentials, you will be prompted to enter them.
+
+If there are no credentials present in the URL and authentication is needed, the [Git credential helper](https://git-scm.com/doc/credential-helpers) will be queried.
 
 ### Dependency caching
 

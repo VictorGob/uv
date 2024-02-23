@@ -906,8 +906,10 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "tracing",
  "url",
  "urlencoding",
+ "uv-auth",
  "uv-fs",
  "uv-git",
  "uv-normalize",
@@ -1292,6 +1294,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uv-cache",
+ "uv-fs",
  "uv-interpreter",
  "which",
 ]
@@ -2455,7 +2458,7 @@ dependencies = [
 [[package]]
 name = "pubgrub"
 version = "0.2.1"
-source = "git+https://github.com/zanieb/pubgrub?rev=9b6d89cb8a0c7902815c8b2ae99106ba322ffb14#9b6d89cb8a0c7902815c8b2ae99106ba322ffb14"
+source = "git+https://github.com/zanieb/pubgrub?rev=aab132a3d4d444dd8dd41d8c4e605abd69dacfe1#aab132a3d4d444dd8dd41d8c4e605abd69dacfe1"
 dependencies = [
  "indexmap 2.2.3",
  "log",
@@ -3489,17 +3492,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
-name = "tar"
-version = "0.4.40"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b16afcea1f22891c49a00c751c7b63b2233284064f11a200fc624137c51e2ddb"
-dependencies = [
- "filetime",
- "libc",
- "xattr",
-]
-
-[[package]]
 name = "target-lexicon"
 version = "0.12.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4136,12 +4128,13 @@ checksum = "f00cc9702ca12d3c81455259621e676d0f7251cec66a21e98fe2e9a37db93b2a"
 
 [[package]]
 name = "uv"
-version = "0.1.6"
+version = "0.1.9"
 dependencies = [
  "anstream",
  "anyhow",
  "assert_cmd",
  "assert_fs",
+ "base64 0.21.7",
  "chrono",
  "clap",
  "clap_complete_command",
@@ -4199,6 +4192,14 @@ dependencies = [
  "uv-traits",
  "uv-warnings",
  "which",
+]
+
+[[package]]
+name = "uv-auth"
+version = "0.0.1"
+dependencies = [
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -4292,6 +4293,7 @@ dependencies = [
  "tracing",
  "url",
  "urlencoding",
+ "uv-auth",
  "uv-cache",
  "uv-fs",
  "uv-normalize",
@@ -4423,7 +4425,6 @@ dependencies = [
  "futures",
  "rayon",
  "rustc-hash",
- "tar",
  "thiserror",
  "tokio",
  "tokio-tar",
@@ -4599,9 +4600,12 @@ name = "uv-traits"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "clap",
  "distribution-types",
  "once-map",
  "pep508_rs",
+ "serde",
+ "serde_json",
  "tokio",
  "uv-cache",
  "uv-interpreter",
